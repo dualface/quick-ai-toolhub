@@ -17,6 +17,8 @@ import (
 	"quick-ai-toolhub/internal/issuesync"
 )
 
+const progressHeartbeatInterval = 60 * time.Second
+
 type Executor struct {
 	runner CommandRunner
 	now    func() time.Time
@@ -127,7 +129,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		runCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
-	stopHeartbeat := startProgressHeartbeat(runCtx, opts.ProgressOutput, 30*time.Second)
+	stopHeartbeat := startProgressHeartbeat(runCtx, opts.ProgressOutput, progressHeartbeatInterval)
 	defer stopHeartbeat()
 
 	cmdResult, runErr := e.runner.Run(runCtx, cmdReq)
@@ -942,14 +944,13 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	}
 
 	done := make(chan struct{})
-	startedAt := time.Now()
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(out, "[progress] still running (%s)\n", formatHeartbeatElapsed(time.Since(startedAt)))
+				fmt.Fprintln(out, "[progress] still running")
 			case <-ctx.Done():
 				return
 			case <-done:
@@ -961,18 +962,6 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	return func() {
 		close(done)
 	}
-}
-
-func formatHeartbeatElapsed(elapsed time.Duration) string {
-	if elapsed < 0 {
-		elapsed = 0
-	}
-
-	if elapsed < time.Second {
-		return elapsed.Round(time.Millisecond).String()
-	}
-
-	return elapsed.Truncate(time.Second).String()
 }
 
 func codexSandbox(agentType AgentType) string {

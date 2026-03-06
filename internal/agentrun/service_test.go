@@ -539,35 +539,11 @@ func TestStartProgressHeartbeatWritesSignal(t *testing.T) {
 	time.Sleep(25 * time.Millisecond)
 	stop()
 
-	if !strings.Contains(progress.String(), "[progress] still running (") {
+	if !strings.Contains(progress.String(), "[progress] still running\n") {
 		t.Fatalf("unexpected heartbeat output: %q", progress.String())
 	}
-	if !strings.Contains(progress.String(), "[progress] still running (21ms)") &&
-		!strings.Contains(progress.String(), "[progress] still running (20ms)") &&
-		!strings.Contains(progress.String(), "[progress] still running (19ms)") {
-		t.Fatalf("expected elapsed time to advance beyond the first tick: %q", progress.String())
-	}
-}
-
-func TestFormatHeartbeatElapsed(t *testing.T) {
-	tests := []struct {
-		name    string
-		elapsed time.Duration
-		want    string
-	}{
-		{name: "negative becomes zero", elapsed: -1 * time.Second, want: "0s"},
-		{name: "subsecond keeps milliseconds", elapsed: 1250 * time.Microsecond, want: "1ms"},
-		{name: "seconds drop fractional part", elapsed: 1200 * time.Millisecond, want: "1s"},
-		{name: "minutes drop fractional seconds", elapsed: time.Minute + 2300*time.Millisecond, want: "1m2s"},
-		{name: "hours drop fractional seconds", elapsed: time.Hour + 2*time.Minute + 3400*time.Millisecond, want: "1h2m3s"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := formatHeartbeatElapsed(tt.elapsed); got != tt.want {
-				t.Fatalf("formatHeartbeatElapsed(%s) = %q, want %q", tt.elapsed, got, tt.want)
-			}
-		})
+	if strings.Contains(progress.String(), "(") {
+		t.Fatalf("expected heartbeat output without elapsed time: %q", progress.String())
 	}
 }
 
