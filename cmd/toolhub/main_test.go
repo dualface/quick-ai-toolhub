@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"quick-ai-toolhub/internal/agentrun"
+	sharedconfig "quick-ai-toolhub/internal/config"
 )
 
 type fakeRunTaskExecutor struct {
@@ -173,17 +177,31 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 }
 
 func TestServeBootstrapsApplication(t *testing.T) {
+	root := newServeTestRepo(t)
+	t.Setenv(sharedconfig.ConfigFileEnv, filepath.Join(root, sharedconfig.DefaultFile))
+
 	var stdout bytes.Buffer
 	if err := run(context.Background(), []string{"serve"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run serve: %v", err)
 	}
 
-	var payload map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &payload); err != nil {
-		t.Fatalf("unmarshal serve output: %v\noutput=%s", err, stdout.String())
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected serve output")
 	}
-	if payload["msg"] != "toolhub bootstrapped" {
-		t.Fatalf("unexpected message: %#v", payload["msg"])
+
+	var payload map[string]any
+	for _, line := range lines {
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("unmarshal serve output: %v\noutput=%s", err, stdout.String())
+		}
+		if entry["msg"] == "toolhub bootstrapped" {
+			payload = entry
+		}
+	}
+	if payload == nil {
+		t.Fatalf("missing bootstrap log entry in output:\n%s", stdout.String())
 	}
 
 	components, ok := payload["components"].([]any)
@@ -192,6 +210,10 @@ func TestServeBootstrapsApplication(t *testing.T) {
 	}
 	if len(components) != 6 {
 		t.Fatalf("unexpected component count: %d", len(components))
+	}
+
+	if _, err := os.Stat(filepath.Join(root, ".toolhub", "toolhub.db")); err != nil {
+		t.Fatalf("stat bootstrapped database: %v", err)
 	}
 }
 
@@ -216,5 +238,67 @@ func TestRunTaskInvalidFlagIsClassifiedAsInvalidRequest(t *testing.T) {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %q in output:\n%s", needle, output)
 		}
+	}
+}
+
+func newServeTestRepo(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	writeServeTestFile(t, root, sharedconfig.DefaultFile, validServeConfigYAML())
+	writeServeTestFile(t, root, filepath.Join("sql", "schema.sql"), repoSchemaForServeTest(t))
+	return root
+}
+
+func validServeConfigYAML() string {
+	return strings.TrimSpace(`
+repo:
+  github_owner: example-owner
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
+default_model: gpt-5.3-codex-spark
+
+agents:
+  developer:
+    template_file: prompts/agents/developer.md
+  qa:
+    template_file: prompts/agents/qa.md
+  reviewer:
+    template_file: prompts/agents/reviewer.md
+`) + "\n"
+}
+
+func repoSchemaForServeTest(t *testing.T) string {
+	t.Helper()
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test file path")
+	}
+
+	schemaPath := filepath.Join(filepath.Dir(file), "..", "..", "sql", "schema.sql")
+	data, err := os.ReadFile(schemaPath)
+	if err != nil {
+		t.Fatalf("read repo schema: %v", err)
+	}
+	return string(data)
+}
+
+func writeServeTestFile(t *testing.T, root, relativePath, content string) {
+	t.Helper()
+
+	path := filepath.Join(root, relativePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }

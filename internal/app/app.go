@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 
@@ -80,6 +81,16 @@ func (a *Application) Bootstrap(ctx context.Context) error {
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if a.config == nil {
+		return errors.New("nil config")
+	}
+
+	if err := a.store.Open(ctx, store.OpenOptions{
+		ConfigPath:   a.config.Path,
+		DatabasePath: a.config.Database.Path,
+	}); err != nil {
+		return fmt.Errorf("open store: %w", err)
 	}
 
 	a.logger.Info("toolhub bootstrapped", slog.Any("components", a.ComponentNames()))
