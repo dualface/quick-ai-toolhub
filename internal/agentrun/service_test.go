@@ -281,7 +281,7 @@ func TestRunTaskTimeoutReturnsStructuredResult(t *testing.T) {
 	if result.Status != "failed" {
 		t.Fatalf("unexpected status: %s", result.Status)
 	}
-	if result.FailureFingerprint != ErrorCodeMalformedOutput {
+	if result.FailureFingerprint != ErrorCodeRunnerTimeout {
 		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
 	}
 	if result.ArtifactRefs.Log == "" || result.ArtifactRefs.Report == "" {

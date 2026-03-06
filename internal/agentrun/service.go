@@ -114,6 +114,12 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	cmdReq.StdoutWriter = opts.StreamOutput
 	cmdReq.StderrWriter = opts.StreamOutput
 	cmdReq.ProgressWriter = opts.ProgressOutput
+	cmdReq.Metadata = CommandMetadata{
+		Model:       effectiveModel(opts),
+		Sandbox:     codexSandbox(opts.AgentType),
+		EnvKeys:     []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"},
+		EnvSnapshot: envSnapshot(cmdReq.Env, "TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"),
+	}
 
 	runCtx := ctx
 	if opts.Timeout > 0 {
@@ -146,6 +152,17 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	}
 
 	if runErr != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			result.Status = "failed"
+			result.Summary = "codex_exec timed out before producing a structured result"
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeRunnerTimeout
+			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+				return Result{}, err
+			}
+			return result, nil
+		}
+
 		if payload, sessionID, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout); err == nil {
 			if err := validatePayload(payload); err == nil {
 				result = resultFromPayload(payload, sessionID)
@@ -168,17 +185,6 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 			result.Summary = "codex_exec did not return a valid structured result"
 			result.NextAction = "retry"
 			result.FailureFingerprint = ErrorCodeMalformedOutput
-			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
-				return Result{}, err
-			}
-			return result, nil
-		}
-
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			result.Status = "failed"
-			result.Summary = "codex_exec timed out before producing a structured result"
-			result.NextAction = "retry"
-			result.FailureFingerprint = ErrorCodeRunnerTimeout
 			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
 				return Result{}, err
 			}
@@ -321,6 +327,13 @@ func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (
 		)
 	}
 	return CommandRequest{Args: args, Stdin: []byte(prompt)}, nil
+}
+
+func effectiveModel(opts RunOptions) string {
+	if strings.TrimSpace(opts.Model) == "" {
+		return "(runner default)"
+	}
+	return opts.Model
 }
 
 func buildCommandEnv(workdir string, agentType AgentType) ([]string, error) {
@@ -793,6 +806,20 @@ func upsertEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+func envSnapshot(env []string, keys ...string) map[string]string {
+	snapshot := make(map[string]string, len(keys))
+	for _, key := range keys {
+		prefix := key + "="
+		for _, entry := range env {
+			if strings.HasPrefix(entry, prefix) {
+				snapshot[key] = strings.TrimPrefix(entry, prefix)
+				break
+			}
+		}
+	}
+	return snapshot
 }
 
 func buildRunnerOutputDir(workdir, outputRoot, runDir string, agentType AgentType) (string, error) {

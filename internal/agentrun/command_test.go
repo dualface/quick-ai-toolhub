@@ -39,6 +39,15 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 	result, err := runner.Run(context.Background(), CommandRequest{
 		Args:           []string{"sh", "-c", "printf '%s\n' '{\"type\":\"thread.started\"}' '{\"type\":\"item.updated\",\"item\":{\"type\":\"todo_list\",\"items\":[{\"text\":\"first\",\"completed\":true},{\"text\":\"second\",\"completed\":false}]}}' '{\"type\":\"turn.completed\"}'"},
 		ProgressWriter: &progress,
+		Metadata: CommandMetadata{
+			Model:   "gpt-5-codex",
+			Sandbox: "workspace-write",
+			EnvKeys: []string{"TMPDIR", "GOCACHE"},
+			EnvSnapshot: map[string]string{
+				"TMPDIR":  "/repo/.toolhub/runtime/tmp",
+				"GOCACHE": "/repo/.toolhub/runtime/go-cache",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("run command: %v", err)
@@ -50,12 +59,49 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 
 	got := progress.String()
 	for _, needle := range []string{
+		"[progress] model: gpt-5-codex",
+		"[progress] sandbox: workspace-write",
+		"[progress] env: TMPDIR=/repo/.toolhub/runtime/tmp, GOCACHE=/repo/.toolhub/runtime/go-cache",
 		"[progress] agent started",
 		"[progress] todo 1/2, current: second",
 		"[progress] agent finished",
 	} {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("missing %q in progress output: %q", needle, got)
+		}
+	}
+}
+
+func TestExecCommandRunnerStreamOutputsMetadata(t *testing.T) {
+	var stream bytes.Buffer
+
+	runner := ExecCommandRunner{}
+	_, err := runner.Run(context.Background(), CommandRequest{
+		Args:         []string{"sh", "-c", "printf 'out'"},
+		StdoutWriter: &stream,
+		StderrWriter: &stream,
+		Metadata: CommandMetadata{
+			Model:   "gpt-5-codex",
+			Sandbox: "workspace-write",
+			EnvKeys: []string{"TMPDIR"},
+			EnvSnapshot: map[string]string{
+				"TMPDIR": "/repo/.toolhub/runtime/tmp",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+
+	got := stream.String()
+	for _, needle := range []string{
+		"[meta] model: gpt-5-codex",
+		"[meta] sandbox: workspace-write",
+		"[meta] env: TMPDIR=/repo/.toolhub/runtime/tmp",
+		"out",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in stream output: %q", needle, got)
 		}
 	}
 }

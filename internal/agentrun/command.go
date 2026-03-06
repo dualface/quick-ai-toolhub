@@ -17,9 +17,17 @@ type CommandRequest struct {
 	Args           []string
 	Stdin          []byte
 	Env            []string
+	Metadata       CommandMetadata
 	StdoutWriter   io.Writer
 	StderrWriter   io.Writer
 	ProgressWriter io.Writer
+}
+
+type CommandMetadata struct {
+	Model       string
+	Sandbox     string
+	EnvKeys     []string
+	EnvSnapshot map[string]string
 }
 
 type CommandResult struct {
@@ -50,6 +58,8 @@ func (ExecCommandRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	cmd.Stdout = selectStdoutWriter(&stdout, req.StdoutWriter, req.ProgressWriter)
 	cmd.Stderr = selectStderrWriter(&stderr, req.StderrWriter, req.ProgressWriter)
 
+	writeCommandMetadata(req.StdoutWriter, req.ProgressWriter, req.Metadata)
+
 	err := cmd.Run()
 	result := CommandResult{
 		Stdout: stdout.Bytes(),
@@ -60,6 +70,44 @@ func (ExecCommandRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	}
 
 	return result, nil
+}
+
+func writeCommandMetadata(stream, progress io.Writer, meta CommandMetadata) {
+	lines := formatCommandMetadata(meta)
+	if len(lines) == 0 {
+		return
+	}
+	for _, line := range lines {
+		if progress != nil {
+			fmt.Fprintf(progress, "[progress] %s\n", line)
+		}
+		if stream != nil {
+			fmt.Fprintf(stream, "[meta] %s\n", line)
+		}
+	}
+}
+
+func formatCommandMetadata(meta CommandMetadata) []string {
+	var lines []string
+	if strings.TrimSpace(meta.Model) != "" {
+		lines = append(lines, fmt.Sprintf("model: %s", meta.Model))
+	}
+	if strings.TrimSpace(meta.Sandbox) != "" {
+		lines = append(lines, fmt.Sprintf("sandbox: %s", meta.Sandbox))
+	}
+	if len(meta.EnvKeys) > 0 {
+		var parts []string
+		for _, key := range meta.EnvKeys {
+			value := strings.TrimSpace(meta.EnvSnapshot[key])
+			if value == "" {
+				parts = append(parts, fmt.Sprintf("%s=<empty>", key))
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+		}
+		lines = append(lines, "env: "+strings.Join(parts, ", "))
+	}
+	return lines
 }
 
 func selectStdoutWriter(buffer *bytes.Buffer, stream, progress io.Writer) io.Writer {
