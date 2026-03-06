@@ -81,6 +81,13 @@ export GOCACHE="$PWD/.toolhub/runtime/go-cache"
 
 这条不需要手工配置，但本机环境不能阻止 `codex --add-dir` 使用额外可写目录。
 
+### 3.1 Codex 运行时目录约束
+
+- 默认保留用户现有 `HOME` / `~/.codex`，避免破坏 `codex login status`
+- `toolhub` 会显式设置 repo 内的 `TMPDIR`、`GOTMPDIR`、`GOCACHE`
+- 如果宿主环境会让 `codex` 访问 `~/.codex/tmp/arg0` 时触发权限错误，可在 `developer` / `qa` 运行里改用 `toolhub run-task --isolated-codex-home`
+- `--isolated-codex-home` 只作为后备隔离模式；默认不要打开，除非确认 Codex 自身运行时目录会阻塞执行
+
 ### 4. 网络访问
 
 至少要允许：

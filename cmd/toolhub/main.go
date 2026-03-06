@@ -103,6 +103,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --timeout               Timeout duration, e.g. 30m.")
 	fmt.Fprintln(w, "  --model                 Optional runner model override.")
 	fmt.Fprintln(w, "  --yolo                  Bypass approvals and sandbox for codex.")
+	fmt.Fprintln(w, "  --isolated-codex-home   Developer/qa only: redirect codex HOME into .toolhub/runtime/home.")
 	fmt.Fprintln(w, "  --stream                Stream live agent output to stderr.")
 	fmt.Fprintln(w, "  --no-progress           Disable low-noise progress updates to stderr.")
 }
@@ -211,6 +212,7 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "runner timeout")
 	fs.StringVar(&opts.Model, "model", "", "optional model override")
 	fs.BoolVar(&opts.Yolo, "yolo", false, "bypass approvals and sandbox for codex")
+	fs.BoolVar(&opts.IsolatedCodexHome, "isolated-codex-home", false, "developer/qa only: redirect codex HOME into .toolhub/runtime/home")
 	fs.BoolVar(&stream, "stream", false, "stream live agent output to stderr")
 	fs.BoolVar(&noProgress, "no-progress", false, "disable low-noise progress updates to stderr")
 

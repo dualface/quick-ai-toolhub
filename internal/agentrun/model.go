@@ -20,21 +20,22 @@ const (
 )
 
 type RunOptions struct {
-	TaskID         string
-	AgentType      AgentType
-	Attempt        int
-	Lens           string
-	ContextRefs    ContextRefs
-	ConfigFile     string
-	PlanFile       string
-	TasksDir       string
-	WorkDir        string
-	OutputRoot     string
-	Model          string
-	Yolo           bool
-	Timeout        time.Duration
-	StreamOutput   io.Writer
-	ProgressOutput io.Writer
+	TaskID            string
+	AgentType         AgentType
+	Attempt           int
+	Lens              string
+	ContextRefs       ContextRefs
+	ConfigFile        string
+	PlanFile          string
+	TasksDir          string
+	WorkDir           string
+	OutputRoot        string
+	Model             string
+	Yolo              bool
+	IsolatedCodexHome bool
+	Timeout           time.Duration
+	StreamOutput      io.Writer
+	ProgressOutput    io.Writer
 }
 
 type ContextRefs struct {

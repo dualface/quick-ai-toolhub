@@ -107,18 +107,19 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, err
 	}
 	cmdReq.WorkDir = opts.WorkDir
-	cmdReq.Env, err = buildCommandEnv(opts.WorkDir, opts.AgentType)
+	cmdReq.Env, err = buildCommandEnv(opts.WorkDir, opts.AgentType, opts.IsolatedCodexHome)
 	if err != nil {
 		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "prepare command env: %v", err)
 	}
 	cmdReq.StdoutWriter = opts.StreamOutput
 	cmdReq.StderrWriter = opts.StreamOutput
 	cmdReq.ProgressWriter = opts.ProgressOutput
+	envKeys := commandEnvKeys(opts)
 	cmdReq.Metadata = CommandMetadata{
 		Model:       effectiveModel(opts),
 		Sandbox:     effectiveSandboxMode(opts),
-		EnvKeys:     []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"},
-		EnvSnapshot: envSnapshot(cmdReq.Env, "TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"),
+		EnvKeys:     envKeys,
+		EnvSnapshot: envSnapshot(cmdReq.Env, envKeys...),
 	}
 
 	runCtx := ctx
@@ -192,7 +193,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		}
 
 		result.Status = "failed"
-		result.Summary = "codex_exec failed before producing a structured result"
+		result.Summary = runnerFailureSummary(cmdResult.Stderr)
 		result.NextAction = "retry"
 		result.FailureFingerprint = ErrorCodeRunnerExecution
 		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -261,6 +262,9 @@ func validateOptions(opts *RunOptions) error {
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 30 * time.Minute
+	}
+	if opts.IsolatedCodexHome && opts.AgentType == AgentReviewer {
+		return newToolError(ErrorCodeInvalidRequest, "isolated codex home is not supported for reviewer", false)
 	}
 	return nil
 }
@@ -347,7 +351,19 @@ func effectiveSandboxMode(opts RunOptions) string {
 	return codexSandbox(opts.AgentType)
 }
 
-func buildCommandEnv(workdir string, agentType AgentType) ([]string, error) {
+func commandEnvKeys(opts RunOptions) []string {
+	if opts.AgentType == AgentReviewer {
+		return nil
+	}
+
+	keys := []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"}
+	if opts.IsolatedCodexHome {
+		keys = append(keys, "HOME")
+	}
+	return keys
+}
+
+func buildCommandEnv(workdir string, agentType AgentType, isolatedCodexHome bool) ([]string, error) {
 	env := os.Environ()
 	if agentType == AgentReviewer {
 		return env, nil
@@ -368,7 +384,24 @@ func buildCommandEnv(workdir string, agentType AgentType) ([]string, error) {
 	env = upsertEnv(env, "TEMP", tmpDir)
 	env = upsertEnv(env, "GOTMPDIR", goBuildDir)
 	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	if isolatedCodexHome {
+		homeDir := filepath.Join(baseDir, "home")
+		if err := os.MkdirAll(homeDir, 0o755); err != nil {
+			return nil, err
+		}
+		env = upsertEnv(env, "HOME", homeDir)
+	}
 	return env, nil
+}
+
+func runnerFailureSummary(stderr []byte) string {
+	const defaultSummary = "codex_exec failed before producing a structured result"
+
+	text := string(stderr)
+	if strings.Contains(text, ".codex/tmp/arg0") && strings.Contains(text, "Permission denied") {
+		return "codex_exec failed before producing a structured result; codex could not write its runtime temp dir under ~/.codex/tmp/arg0"
+	}
+	return defaultSummary
 }
 
 func parseRunnerOutput(lastMessagePath string, stdout []byte) (resultPayload, string, error) {

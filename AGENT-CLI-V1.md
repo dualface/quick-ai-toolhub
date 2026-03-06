@@ -24,7 +24,10 @@
 ### `codex_exec`
 
 ```bash
-codex exec \
+codex \
+  --ask-for-approval never \
+  --sandbox workspace-write \
+  exec \
   --cd <worktree_path> \
   --output-schema <schema_file> \
   --json \
@@ -37,6 +40,9 @@ codex exec \
 - prompt 可以从 `stdin` 输入
 - 需要续跑时使用 `codex exec resume`
 - 默认模型和角色 prompt template 由 `config/config.yaml` + `prompts/agents/*.md` 提供
+- 要允许 agent 任意读写当前工作目录，必须同时显式设置 `--cd <worktree_path>` 和 `--sandbox workspace-write`
+- 只要 schema、最终消息文件或其他产物目录位于 worktree 外，就必须显式追加对应的 `--add-dir`
+- `toolhub run-task --isolated-codex-home` 只作为 `developer` / `qa` 的后备隔离开关；默认仍保留用户现有 `HOME`/登录态
 
 ## `run-agent-tool` 实现要求
 
@@ -79,6 +85,7 @@ codex exec \
 - 禁止使用 `--dangerously-bypass-approvals-and-sandbox`
 - 仅在人工手动执行 `toolhub run-task --yolo` 时，允许改为传 `--dangerously-bypass-approvals-and-sandbox`，且此时不得再传 `--sandbox`
 - 如需写入工作区外的产物目录，必须显式传 `--add-dir`
+- 默认保留用户现有 `HOME`；只有 `developer` / `qa` 显式启用 `toolhub run-task --isolated-codex-home` 时，才把 `HOME` 重定向到 repo 内的 `.toolhub/runtime/home`
 - 不依赖用户 `profile` 中的 sandbox 默认值
 
 ## 不纳入 `v1` 的内容

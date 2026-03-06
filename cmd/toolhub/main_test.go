@@ -40,6 +40,9 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 				if opts.ContextRefs.ArtifactRefs.Log != "logs/input.log" {
 					t.Fatalf("unexpected context log: %s", opts.ContextRefs.ArtifactRefs.Log)
 				}
+				if !opts.IsolatedCodexHome {
+					t.Fatal("expected isolated codex home to be enabled")
+				}
 				return agentrun.Result{
 					Runner:     agentrun.RunnerCodexExec,
 					Status:     "success",
@@ -61,6 +64,7 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 		"--github-pr-number", "42",
 		"--context-log", "logs/input.log",
 		"--yolo",
+		"--isolated-codex-home",
 	}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
@@ -161,7 +165,7 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"toolhub serve", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--no-progress"} {
+	for _, needle := range []string{"toolhub serve", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}

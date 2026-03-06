@@ -56,6 +56,7 @@
 - 不要直接内嵌 GitHub HTTP API client；统一通过 `gh` 或 `gh api`
 - Agent CLI 约定见 `AGENT-CLI-V1.md`
 - Agent CLI 调用必须显式设置权限策略，不得继承用户机器上的危险默认配置
+- 默认保留用户现有 `HOME`/Codex 登录态；只有明确需要隔离 Codex 运行时目录时才启用独立 home
 - `reviewer` 必须保持只读；`developer`、`qa` 只允许写入 task worktree 和显式附加目录
 
 ## 数据与 schema 约束

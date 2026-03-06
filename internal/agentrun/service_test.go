@@ -437,6 +437,91 @@ func TestBuildCommandSkipsWritableDirInsideWorktree(t *testing.T) {
 	}
 }
 
+func TestBuildCommandEnvDeveloperSetsRepoLocalRuntimeDirs(t *testing.T) {
+	repo := t.TempDir()
+
+	env, err := buildCommandEnv(repo, AgentDeveloper, false)
+	if err != nil {
+		t.Fatalf("build command env: %v", err)
+	}
+
+	want := map[string]string{
+		"TMPDIR":   filepath.Join(repo, ".toolhub", "runtime", "tmp"),
+		"TMP":      filepath.Join(repo, ".toolhub", "runtime", "tmp"),
+		"TEMP":     filepath.Join(repo, ".toolhub", "runtime", "tmp"),
+		"GOTMPDIR": filepath.Join(repo, ".toolhub", "runtime", "go-build"),
+		"GOCACHE":  filepath.Join(repo, ".toolhub", "runtime", "go-cache"),
+	}
+	for key, expected := range want {
+		if got := envValue(env, key); got != expected {
+			t.Fatalf("unexpected %s: got %q want %q", key, got, expected)
+		}
+	}
+	if got := envValue(env, "HOME"); got == filepath.Join(repo, ".toolhub", "runtime", "home") {
+		t.Fatalf("did not expect HOME override by default, got %q", got)
+	}
+}
+
+func TestBuildCommandEnvIsolatedCodexHomeOverridesHome(t *testing.T) {
+	repo := t.TempDir()
+
+	env, err := buildCommandEnv(repo, AgentDeveloper, true)
+	if err != nil {
+		t.Fatalf("build command env: %v", err)
+	}
+
+	wantHome := filepath.Join(repo, ".toolhub", "runtime", "home")
+	if got := envValue(env, "HOME"); got != wantHome {
+		t.Fatalf("unexpected HOME: got %q want %q", got, wantHome)
+	}
+	if _, err := os.Stat(wantHome); err != nil {
+		t.Fatalf("expected isolated HOME dir to exist: %v", err)
+	}
+}
+
+func TestCommandEnvKeysIncludeHomeOnlyForIsolatedDeveloperRuns(t *testing.T) {
+	keys := commandEnvKeys(RunOptions{AgentType: AgentDeveloper})
+	if strings.Join(keys, ",") != "TMPDIR,TMP,TEMP,GOTMPDIR,GOCACHE" {
+		t.Fatalf("unexpected default env keys: %v", keys)
+	}
+
+	keys = commandEnvKeys(RunOptions{AgentType: AgentDeveloper, IsolatedCodexHome: true})
+	if strings.Join(keys, ",") != "TMPDIR,TMP,TEMP,GOTMPDIR,GOCACHE,HOME" {
+		t.Fatalf("unexpected isolated env keys: %v", keys)
+	}
+
+	if keys := commandEnvKeys(RunOptions{AgentType: AgentReviewer}); len(keys) != 0 {
+		t.Fatalf("expected reviewer env keys to be empty, got %v", keys)
+	}
+}
+
+func TestRunnerFailureSummaryIncludesCodexRuntimeHint(t *testing.T) {
+	stderr := []byte("WARNING: proceeding, even though we could not update PATH: Permission denied (os error 13) at path \"/home/work/.codex/tmp/arg0/codex-arg0abcd\"")
+	got := runnerFailureSummary(stderr)
+	if !strings.Contains(got, "~/.codex/tmp/arg0") {
+		t.Fatalf("expected runtime hint in summary, got %q", got)
+	}
+}
+
+func TestValidateOptionsRejectsIsolatedCodexHomeForReviewer(t *testing.T) {
+	err := validateOptions(&RunOptions{
+		TaskID:            "Sprint-04/Task-01",
+		AgentType:         AgentReviewer,
+		IsolatedCodexHome: true,
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+
+	toolErr, ok := err.(*ToolError)
+	if !ok {
+		t.Fatalf("expected tool error, got %T", err)
+	}
+	if toolErr.Code != ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected error code: %s", toolErr.Code)
+	}
+}
+
 func TestBuildRunDirIncludesAgentAttemptLensAndRunID(t *testing.T) {
 	got := buildRunDir("/artifacts", "Sprint-04/Task-01", AgentReviewer, "qa review", 2, time.Date(2026, 3, 6, 12, 4, 5, 123, time.UTC), "abcd1234")
 	want := filepath.Join("/artifacts", "Sprint-04", "Task-01", "reviewer", "attempt-02", "qa_review", "20260306T120405.000000123Z-abcd1234")
@@ -741,4 +826,14 @@ func envContainsKey(env []string, key string) bool {
 		}
 	}
 	return false
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }
