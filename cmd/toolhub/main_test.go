@@ -161,10 +161,33 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--no-progress"} {
+	for _, needle := range []string{"toolhub serve", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}
+	}
+}
+
+func TestServeBootstrapsApplication(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := run(context.Background(), []string{"serve"}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run serve: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &payload); err != nil {
+		t.Fatalf("unmarshal serve output: %v\noutput=%s", err, stdout.String())
+	}
+	if payload["msg"] != "toolhub bootstrapped" {
+		t.Fatalf("unexpected message: %#v", payload["msg"])
+	}
+
+	components, ok := payload["components"].([]any)
+	if !ok {
+		t.Fatalf("missing components: %#v", payload["components"])
+	}
+	if len(components) != 6 {
+		t.Fatalf("unexpected component count: %d", len(components))
 	}
 }
 

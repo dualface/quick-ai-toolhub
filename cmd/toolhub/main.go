@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"quick-ai-toolhub/internal/agentrun"
+	"quick-ai-toolhub/internal/app"
 	"quick-ai-toolhub/internal/issuesync"
 )
 
@@ -57,6 +58,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return nil
+	case "serve":
+		return runServe(ctx, args[1:], stdout)
 	case "sync-issues":
 		return runSyncIssues(ctx, args[1:], stdout)
 	case "run-task":
@@ -70,8 +73,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "toolhub")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  toolhub serve")
 	fmt.Fprintln(w, "  toolhub sync-issues [flags]")
 	fmt.Fprintln(w, "  toolhub run-task <task-id> [flags]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  serve                 Bootstrap the single-process application skeleton.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "sync-issues Flags:")
 	fmt.Fprintln(w, "  --apply                 Perform GitHub writes. Default is dry-run.")
@@ -98,6 +105,25 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --yolo                  Bypass approvals and sandbox for codex.")
 	fmt.Fprintln(w, "  --stream                Stream live agent output to stderr.")
 	fmt.Fprintln(w, "  --no-progress           Disable low-noise progress updates to stderr.")
+}
+
+func runServe(ctx context.Context, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage(stdout)
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("serve does not accept positional arguments")
+	}
+
+	application := app.New(app.Options{Logger: app.NewLogger(stdout)})
+	return application.Bootstrap(ctx)
 }
 
 func runSyncIssues(ctx context.Context, args []string, stdout io.Writer) error {
