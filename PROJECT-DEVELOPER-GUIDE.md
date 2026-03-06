@@ -38,6 +38,8 @@
 - 默认配置文件为 `config/config.yaml`
 - GitHub 出站操作统一使用 `gh`
 - 本地 Git 操作统一使用 `git`
+- Agent 默认 runner 使用 `codex exec`
+- `run-agent-tool` 额外支持 `claude --print` 和 `opencode run`
 - HTTP 服务使用 `net/http`
 - 进程日志使用 `log/slog`，输出 `JSON`
 
@@ -48,6 +50,9 @@
 - 如果命令运行目录不在目标仓库 worktree 中，必须显式传 `-R <owner>/<repo>`
 - 本地分支、提交、rebase、push 仍使用 `git`
 - 不要直接内嵌 GitHub HTTP API client；统一通过 `gh` 或 `gh api`
+- Agent CLI 约定见 `AGENT-CLI-V1.md`
+- Agent CLI 调用必须显式设置权限策略，不得继承用户机器上的危险默认配置
+- `reviewer` 必须保持只读；`developer`、`qa` 只允许写入 task worktree 和显式附加目录
 
 ## 数据与 schema 约束
 
@@ -101,6 +106,7 @@ plan/
 - 当前 `Task` brief
 - 所属 `Sprint` 上下文
 - 该任务直接引用的规格文档和代码文件
+- 如任务涉及 Agent 执行，还应读取 `AGENT-CLI-V1.md`
 
 如果任务信息不完整，优先回到当前 `Task` brief 和 `SPEC-V1.md` 补全，不自行发明隐含需求。
 

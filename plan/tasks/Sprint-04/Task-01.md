@@ -10,6 +10,7 @@
 - `README.md`
 - `TECH-V1.md`
 - `TOOLS-V1.md`
+- `AGENT-CLI-V1.md`
 - `plan/SPRINTS-V1.md`
 
 ## Dependencies
@@ -20,7 +21,9 @@
 ## In Scope
 
 - 定义 Agent 调用接口
+- 支持 `codex_exec`、`claude_print`、`opencode_run`
 - 支持超时控制和错误归类
+- 显式处理不同 runner 的权限策略
 - 收集结构化结果和 `artifact_refs`
 - 为不同角色传入统一上下文载荷
 
@@ -39,9 +42,12 @@
 ## Acceptance Criteria
 
 - 输出结构符合 `TECH-V1.md`
+- 默认 runner 为 `codex_exec`
+- 不依赖用户本机默认权限配置
 - 调用方可以稳定区分成功、失败、超时
 - `artifact_refs` 和结构化摘要可被阶段机直接消费
 
 ## Notes
 
 - 该工具应优先为可测试性设计，避免与具体 Agent 提供方强耦合
+- `opencode_run` 没有原生 schema 校验时，需由工具层补做结果验证
