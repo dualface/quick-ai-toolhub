@@ -454,8 +454,13 @@ func TestStartProgressHeartbeatWritesSignal(t *testing.T) {
 	time.Sleep(25 * time.Millisecond)
 	stop()
 
-	if !strings.Contains(progress.String(), "[progress] still running (10ms)") {
+	if !strings.Contains(progress.String(), "[progress] still running (") {
 		t.Fatalf("unexpected heartbeat output: %q", progress.String())
+	}
+	if !strings.Contains(progress.String(), "[progress] still running (21ms)") &&
+		!strings.Contains(progress.String(), "[progress] still running (20ms)") &&
+		!strings.Contains(progress.String(), "[progress] still running (19ms)") {
+		t.Fatalf("expected elapsed time to advance beyond the first tick: %q", progress.String())
 	}
 }
 

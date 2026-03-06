@@ -913,13 +913,14 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	}
 
 	done := make(chan struct{})
+	startedAt := time.Now()
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(out, "[progress] still running (%s)\n", interval)
+				fmt.Fprintf(out, "[progress] still running (%s)\n", time.Since(startedAt).Round(time.Millisecond))
 			case <-ctx.Done():
 				return
 			case <-done:
