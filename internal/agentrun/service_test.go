@@ -549,6 +549,28 @@ func TestStartProgressHeartbeatWritesSignal(t *testing.T) {
 	}
 }
 
+func TestFormatHeartbeatElapsed(t *testing.T) {
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    string
+	}{
+		{name: "negative becomes zero", elapsed: -1 * time.Second, want: "0s"},
+		{name: "subsecond keeps milliseconds", elapsed: 1250 * time.Microsecond, want: "1ms"},
+		{name: "seconds drop fractional part", elapsed: 1200 * time.Millisecond, want: "1s"},
+		{name: "minutes drop fractional seconds", elapsed: time.Minute + 2300*time.Millisecond, want: "1m2s"},
+		{name: "hours drop fractional seconds", elapsed: time.Hour + 2*time.Minute + 3400*time.Millisecond, want: "1h2m3s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatHeartbeatElapsed(tt.elapsed); got != tt.want {
+				t.Fatalf("formatHeartbeatElapsed(%s) = %q, want %q", tt.elapsed, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTryDecodePayloadBytesFindsNestedPayload(t *testing.T) {
 	raw := []byte(`{"event":"done","content":"{\"status\":\"success\",\"summary\":\"done\",\"next_action\":\"proceed\",\"failure_fingerprint\":null,\"artifact_refs\":null,\"findings\":null}"}`)
 	payload, ok := tryDecodePayloadBytes(raw)

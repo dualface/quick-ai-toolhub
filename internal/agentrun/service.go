@@ -949,7 +949,7 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(out, "[progress] still running (%s)\n", time.Since(startedAt).Round(time.Millisecond))
+				fmt.Fprintf(out, "[progress] still running (%s)\n", formatHeartbeatElapsed(time.Since(startedAt)))
 			case <-ctx.Done():
 				return
 			case <-done:
@@ -961,6 +961,18 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	return func() {
 		close(done)
 	}
+}
+
+func formatHeartbeatElapsed(elapsed time.Duration) string {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+
+	if elapsed < time.Second {
+		return elapsed.Round(time.Millisecond).String()
+	}
+
+	return elapsed.Truncate(time.Second).String()
 }
 
 func codexSandbox(agentType AgentType) string {
