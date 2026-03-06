@@ -124,6 +124,42 @@ func TestRunTaskExplicitModelOverridesConfig(t *testing.T) {
 	}
 }
 
+func TestRunTaskYoloBypassesSandbox(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			args := strings.Join(req.Args, " ")
+			if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
+				t.Fatalf("expected yolo flag, got %s", args)
+			}
+			if strings.Contains(args, "--ask-for-approval") {
+				t.Fatalf("did not expect ask-for-approval flag in yolo mode, got %s", args)
+			}
+			if strings.Contains(args, "--sandbox") {
+				t.Fatalf("did not expect sandbox flag in yolo mode, got %s", args)
+			}
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			if err := os.WriteFile(lastMessagePath, []byte(`{"status":"success","summary":"ok","next_action":"done","failure_fingerprint":null,"artifact_refs":null,"findings":null}`), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	_, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+		Yolo:      true,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+}
+
 func TestRunTaskReviewerUsesReadOnlySandbox(t *testing.T) {
 	repo := setupTestRepo(t)
 	runner := &fakeCommandRunner{
@@ -323,8 +359,7 @@ func TestRunTaskPreservesAgentReportArtifact(t *testing.T) {
 		t.Fatalf("unexpected report ref: %s", result.ArtifactRefs.Report)
 	}
 
-	localReportPath := filepath.Join(repo, ".toolhub/runs/Sprint-04/Task-01/20260306T120300Z/result.json")
-	localReportPath = filepath.Join(repo, ".toolhub/runs/Sprint-04/Task-01/developer/attempt-01/default/20260306T120300.000000000Z-runid123/result.json")
+	localReportPath := filepath.Join(repo, ".toolhub/runs/Sprint-04/Task-01/developer/attempt-01/default/20260306T120300.000000000Z-runid123/result.json")
 	if _, err := os.Stat(localReportPath); err != nil {
 		t.Fatalf("expected local result report: %v", err)
 	}
@@ -432,6 +467,45 @@ func TestTryDecodePayloadBytesFindsNestedPayload(t *testing.T) {
 	}
 	if payload.Summary != "done" {
 		t.Fatalf("unexpected summary: %s", payload.Summary)
+	}
+}
+
+func TestResultJSONIncludesRequiredContractKeys(t *testing.T) {
+	result := Result{
+		Runner:     RunnerCodexExec,
+		Status:     "success",
+		Summary:    "ok",
+		NextAction: "proceed",
+		ArtifactRefs: ArtifactRefs{
+			Log:      "a",
+			Worktree: "b",
+		},
+	}
+
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	for _, key := range []string{"failure_fingerprint", "artifact_refs", "findings"} {
+		if _, ok := value[key]; !ok {
+			t.Fatalf("missing key %q in result json: %s", key, string(raw))
+		}
+	}
+
+	artifactRefs, ok := value["artifact_refs"].(map[string]any)
+	if !ok {
+		t.Fatalf("artifact_refs is not an object: %T", value["artifact_refs"])
+	}
+	for _, key := range []string{"log", "worktree", "patch", "report"} {
+		if _, ok := artifactRefs[key]; !ok {
+			t.Fatalf("missing artifact_refs key %q in result json: %s", key, string(raw))
+		}
 	}
 }
 

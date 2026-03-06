@@ -96,16 +96,14 @@ func formatCommandMetadata(meta CommandMetadata) []string {
 		lines = append(lines, fmt.Sprintf("sandbox: %s", meta.Sandbox))
 	}
 	if len(meta.EnvKeys) > 0 {
-		var parts []string
 		for _, key := range meta.EnvKeys {
 			value := strings.TrimSpace(meta.EnvSnapshot[key])
 			if value == "" {
-				parts = append(parts, fmt.Sprintf("%s=<empty>", key))
+				lines = append(lines, fmt.Sprintf("env %s: <empty>", key))
 				continue
 			}
-			parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+			lines = append(lines, fmt.Sprintf("env %s: %s", key, value))
 		}
-		lines = append(lines, "env: "+strings.Join(parts, ", "))
 	}
 	return lines
 }

@@ -61,7 +61,8 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 	for _, needle := range []string{
 		"[progress] model: gpt-5-codex",
 		"[progress] sandbox: workspace-write",
-		"[progress] env: TMPDIR=/repo/.toolhub/runtime/tmp, GOCACHE=/repo/.toolhub/runtime/go-cache",
+		"[progress] env TMPDIR: /repo/.toolhub/runtime/tmp",
+		"[progress] env GOCACHE: /repo/.toolhub/runtime/go-cache",
 		"[progress] agent started",
 		"[progress] todo 1/2, current: second",
 		"[progress] agent finished",
@@ -97,7 +98,7 @@ func TestExecCommandRunnerStreamOutputsMetadata(t *testing.T) {
 	for _, needle := range []string{
 		"[meta] model: gpt-5-codex",
 		"[meta] sandbox: workspace-write",
-		"[meta] env: TMPDIR=/repo/.toolhub/runtime/tmp",
+		"[meta] env TMPDIR: /repo/.toolhub/runtime/tmp",
 		"out",
 	} {
 		if !strings.Contains(got, needle) {

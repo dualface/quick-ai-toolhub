@@ -95,6 +95,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --output-root           Root directory for run artifacts.")
 	fmt.Fprintln(w, "  --timeout               Timeout duration, e.g. 30m.")
 	fmt.Fprintln(w, "  --model                 Optional runner model override.")
+	fmt.Fprintln(w, "  --yolo                  Bypass approvals and sandbox for codex.")
 	fmt.Fprintln(w, "  --stream                Stream live agent output to stderr.")
 	fmt.Fprintln(w, "  --no-progress           Disable low-noise progress updates to stderr.")
 }
@@ -183,6 +184,7 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fs.StringVar(&opts.OutputRoot, "output-root", ".toolhub/runs", "root directory for run artifacts")
 	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "runner timeout")
 	fs.StringVar(&opts.Model, "model", "", "optional model override")
+	fs.BoolVar(&opts.Yolo, "yolo", false, "bypass approvals and sandbox for codex")
 	fs.BoolVar(&stream, "stream", false, "stream live agent output to stderr")
 	fs.BoolVar(&noProgress, "no-progress", false, "disable low-noise progress updates to stderr")
 

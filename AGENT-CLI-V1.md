@@ -77,6 +77,7 @@ codex exec \
 - `developer`、`qa` 必须显式传 `--sandbox workspace-write`
 - `reviewer` 必须显式传 `--sandbox read-only`
 - 禁止使用 `--dangerously-bypass-approvals-and-sandbox`
+- 仅在人工手动执行 `toolhub run-task --yolo` 时，允许改为传 `--dangerously-bypass-approvals-and-sandbox`，且此时不得再传 `--sandbox`
 - 如需写入工作区外的产物目录，必须显式传 `--add-dir`
 - 不依赖用户 `profile` 中的 sandbox 默认值
 

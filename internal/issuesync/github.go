@@ -262,19 +262,6 @@ func (g *GitHubCLI) AddBlockedBy(ctx context.Context, issueNumber int, blockerID
 	return err
 }
 
-func (g *GitHubCLI) getIssue(ctx context.Context, number int) (IssueRef, error) {
-	out, err := g.get(ctx, fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number))
-	if err != nil {
-		return IssueRef{}, err
-	}
-
-	var ref IssueRef
-	if err := json.Unmarshal(out, &ref); err != nil {
-		return IssueRef{}, fmt.Errorf("parse issue response: %w", err)
-	}
-	return ref, nil
-}
-
 func writeTempBody(body string) (string, error) {
 	file, err := os.CreateTemp("", "toolhub-issue-body-*.md")
 	if err != nil {

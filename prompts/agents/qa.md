@@ -1,4 +1,4 @@
-- 尽量用中文
+- 使用中文
 - Validate the current implementation.
 - Focus on build, test, and lint behavior.
 - Use the provided repo-local temp/cache environment for Go commands instead of relying on /tmp defaults.

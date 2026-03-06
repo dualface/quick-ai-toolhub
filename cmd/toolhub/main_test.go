@@ -28,6 +28,9 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 				if opts.Lens != "delivery" {
 					t.Fatalf("unexpected lens: %s", opts.Lens)
 				}
+				if !opts.Yolo {
+					t.Fatal("expected yolo to be enabled")
+				}
 				if opts.ProgressOutput == nil {
 					t.Fatal("expected progress output writer")
 				}
@@ -57,6 +60,7 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 		"--lens", "delivery",
 		"--github-pr-number", "42",
 		"--context-log", "logs/input.log",
+		"--yolo",
 	}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
@@ -157,7 +161,7 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"--lens", "--github-pr-number", "--context-log", "--config-file", "--no-progress"} {
+	for _, needle := range []string{"--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}

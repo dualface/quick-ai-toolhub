@@ -116,7 +116,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	cmdReq.ProgressWriter = opts.ProgressOutput
 	cmdReq.Metadata = CommandMetadata{
 		Model:       effectiveModel(opts),
-		Sandbox:     codexSandbox(opts.AgentType),
+		Sandbox:     effectiveSandboxMode(opts),
 		EnvKeys:     []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"},
 		EnvSnapshot: envSnapshot(cmdReq.Env, "TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"),
 	}
@@ -291,10 +291,12 @@ func applyDefaultContextRefs(opts *RunOptions, sprint *issuesync.Sprint) {
 }
 
 func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (CommandRequest, error) {
-	args := []string{
-		"codex",
-		"--ask-for-approval", "never",
-		"--sandbox", codexSandbox(opts.AgentType),
+	args := []string{"codex"}
+	if opts.Yolo {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	} else {
+		args = append(args, "--ask-for-approval", "never")
+		args = append(args, "--sandbox", codexSandbox(opts.AgentType))
 	}
 	for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
 		args = append(args, "--add-dir", dir)
@@ -308,10 +310,12 @@ func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (
 		"-",
 	)
 	if opts.Model != "" {
-		args = []string{
-			"codex",
-			"--ask-for-approval", "never",
-			"--sandbox", codexSandbox(opts.AgentType),
+		args = []string{"codex"}
+		if opts.Yolo {
+			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+		} else {
+			args = append(args, "--ask-for-approval", "never")
+			args = append(args, "--sandbox", codexSandbox(opts.AgentType))
 		}
 		for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
 			args = append(args, "--add-dir", dir)
@@ -334,6 +338,13 @@ func effectiveModel(opts RunOptions) string {
 		return "(runner default)"
 	}
 	return opts.Model
+}
+
+func effectiveSandboxMode(opts RunOptions) string {
+	if opts.Yolo {
+		return "dangerously-bypass-approvals-and-sandbox"
+	}
+	return codexSandbox(opts.AgentType)
 }
 
 func buildCommandEnv(workdir string, agentType AgentType) ([]string, error) {
@@ -552,11 +563,6 @@ func getString(value map[string]any, key string) (string, bool) {
 	return str, true
 }
 
-func getStringOrEmpty(value map[string]any, key string) string {
-	str, _ := getString(value, key)
-	return str
-}
-
 func getNullableString(value map[string]any, key string) (string, bool) {
 	raw, ok := value[key]
 	if !ok {
@@ -570,21 +576,6 @@ func getNullableString(value map[string]any, key string) (string, bool) {
 		return "", false
 	}
 	return str, true
-}
-
-func getStringSlice(value any) []string {
-	items, ok := value.([]any)
-	if !ok {
-		return nil
-	}
-	var result []string
-	for _, item := range items {
-		str, ok := item.(string)
-		if ok && strings.TrimSpace(str) != "" {
-			result = append(result, str)
-		}
-	}
-	return result
 }
 
 func parseNullableStringSlice(value any) ([]string, bool) {
@@ -940,14 +931,6 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	return func() {
 		close(done)
 	}
-}
-
-func mustSchema(path string) []byte {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	return data
 }
 
 func codexSandbox(agentType AgentType) string {

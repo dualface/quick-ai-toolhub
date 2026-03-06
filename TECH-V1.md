@@ -50,6 +50,7 @@
 - `run-agent-tool` 默认从 `config/config.yaml` 读取 Agent 配置
 - 不同 `agent_type` 的默认模型和 prompt template 由 `config/config.yaml` + `prompts/agents/*.md` 定义
 - 模型优先级为：CLI 显式覆盖 > `agents.<agent_type>.model` > `default_model`
+- 手工 bootstrap 时允许 `run-task --yolo`，该模式会向 `codex` 传 `--dangerously-bypass-approvals-and-sandbox`，并跳过 `--sandbox`
 - `developer`、`qa` 默认使用 `workspace_write`
 - `reviewer` 默认使用 `read_only`
 - `codex_exec` 使用 CLI 原生 schema 约束

@@ -3,7 +3,6 @@ package issuesync
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -79,10 +78,4 @@ func ParseDependencyRef(value string) (DependencyRef, bool) {
 		TaskLocalID: match[2],
 		TaskID:      fmt.Sprintf("%s/%s", match[1], match[2]),
 	}, true
-}
-
-func sortStrings(values []string) []string {
-	cloned := append([]string(nil), values...)
-	sort.Strings(cloned)
-	return cloned
 }

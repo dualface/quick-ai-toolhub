@@ -31,6 +31,7 @@ type RunOptions struct {
 	WorkDir        string
 	OutputRoot     string
 	Model          string
+	Yolo           bool
 	Timeout        time.Duration
 	StreamOutput   io.Writer
 	ProgressOutput io.Writer
@@ -44,10 +45,10 @@ type ContextRefs struct {
 }
 
 type ArtifactRefs struct {
-	Log      string `json:"log,omitempty"`
-	Worktree string `json:"worktree,omitempty"`
-	Patch    string `json:"patch,omitempty"`
-	Report   string `json:"report,omitempty"`
+	Log      string `json:"log"`
+	Worktree string `json:"worktree"`
+	Patch    string `json:"patch"`
+	Report   string `json:"report"`
 }
 
 type Finding struct {
@@ -68,10 +69,10 @@ type Result struct {
 	Status             string       `json:"status"`
 	Summary            string       `json:"summary"`
 	NextAction         string       `json:"next_action"`
-	FailureFingerprint string       `json:"failure_fingerprint,omitempty"`
+	FailureFingerprint string       `json:"failure_fingerprint"`
 	SessionID          string       `json:"session_id,omitempty"`
-	ArtifactRefs       ArtifactRefs `json:"artifact_refs,omitempty"`
-	Findings           []Finding    `json:"findings,omitempty"`
+	ArtifactRefs       ArtifactRefs `json:"artifact_refs"`
+	Findings           []Finding    `json:"findings"`
 }
 
 type resultPayload struct {
