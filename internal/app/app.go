@@ -11,6 +11,7 @@ import (
 	toolgit "quick-ai-toolhub/internal/git"
 	toolgithub "quick-ai-toolhub/internal/github"
 	"quick-ai-toolhub/internal/leader"
+	"quick-ai-toolhub/internal/logging"
 	"quick-ai-toolhub/internal/orchestrator"
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/timeline"
@@ -35,7 +36,7 @@ type Options struct {
 func New(opts Options) *Application {
 	logger := opts.Logger
 	if logger == nil {
-		logger = NewLogger(io.Discard)
+		logger = logging.NewJSON(io.Discard)
 	}
 
 	storeService := store.New(store.Dependencies{Logger: logger})
@@ -66,13 +67,6 @@ func New(opts Options) *Application {
 		orchestrator: orchestratorService,
 		leader:       leaderService,
 	}
-}
-
-func NewLogger(w io.Writer) *slog.Logger {
-	if w == nil {
-		w = io.Discard
-	}
-	return slog.New(slog.NewJSONHandler(w, nil))
 }
 
 func (a *Application) Bootstrap(ctx context.Context) error {

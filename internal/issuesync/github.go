@@ -1,16 +1,16 @@
 package issuesync
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	sharedcommand "quick-ai-toolhub/internal/command"
 )
 
 type Runner interface {
@@ -24,19 +24,15 @@ func (ExecRunner) Run(ctx context.Context, workdir string, args ...string) ([]by
 		return nil, errors.New("missing command")
 	}
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = workdir
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return stdout.Bytes(), fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	result := sharedcommand.Executor{}.Run(ctx, sharedcommand.Request{
+		WorkDir: workdir,
+		Args:    args,
+	})
+	if result.Err != nil {
+		return result.Stdout, fmt.Errorf("%s: %w: %s", strings.Join(args, " "), result.Err, strings.TrimSpace(string(result.Stderr)))
 	}
 
-	return stdout.Bytes(), nil
+	return result.Stdout, nil
 }
 
 type GitHubClient interface {

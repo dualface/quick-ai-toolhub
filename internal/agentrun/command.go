@@ -8,8 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
+
+	sharedcommand "quick-ai-toolhub/internal/command"
 )
 
 type CommandRequest struct {
@@ -31,8 +32,11 @@ type CommandMetadata struct {
 }
 
 type CommandResult struct {
-	Stdout []byte
-	Stderr []byte
+	Stdout   []byte
+	Stderr   []byte
+	ExitCode int
+	TimedOut bool
+	Err      error
 }
 
 type CommandRunner interface {
@@ -46,30 +50,28 @@ func (ExecCommandRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 		return CommandResult{}, errors.New("missing command")
 	}
 
-	cmd := exec.CommandContext(ctx, req.Args[0], req.Args[1:]...)
-	cmd.Dir = req.WorkDir
-	cmd.Stdin = bytes.NewReader(req.Stdin)
-	if len(req.Env) > 0 {
-		cmd.Env = req.Env
-	}
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = selectStdoutWriter(&stdout, req.StdoutWriter, req.ProgressWriter)
-	cmd.Stderr = selectStderrWriter(&stderr, req.StderrWriter, req.ProgressWriter)
-
 	writeCommandMetadata(req.StdoutWriter, req.ProgressWriter, req.Metadata)
 
-	err := cmd.Run()
-	result := CommandResult{
-		Stdout: stdout.Bytes(),
-		Stderr: stderr.Bytes(),
+	result := sharedcommand.Executor{}.Run(ctx, sharedcommand.Request{
+		WorkDir:      req.WorkDir,
+		Args:         req.Args,
+		Stdin:        req.Stdin,
+		Env:          req.Env,
+		StdoutWriter: selectStdoutWriter(&bytes.Buffer{}, req.StdoutWriter, req.ProgressWriter),
+		StderrWriter: selectStderrWriter(&bytes.Buffer{}, req.StderrWriter, req.ProgressWriter),
+	})
+	commandResult := CommandResult{
+		Stdout:   result.Stdout,
+		Stderr:   result.Stderr,
+		ExitCode: result.ExitCode,
+		TimedOut: result.TimedOut,
+		Err:      result.Err,
 	}
-	if err != nil {
-		return result, fmt.Errorf("%s: %w: %s", strings.Join(req.Args, " "), err, formatCommandFailure(stdout.String(), stderr.String()))
+	if result.Err != nil {
+		return commandResult, fmt.Errorf("%s: %w: %s", strings.Join(req.Args, " "), result.Err, formatCommandFailure(string(result.Stdout), string(result.Stderr)))
 	}
 
-	return result, nil
+	return commandResult, nil
 }
 
 func writeCommandMetadata(stream, progress io.Writer, meta CommandMetadata) {

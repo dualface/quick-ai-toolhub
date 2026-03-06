@@ -16,6 +16,7 @@ import (
 	"quick-ai-toolhub/internal/app"
 	sharedconfig "quick-ai-toolhub/internal/config"
 	"quick-ai-toolhub/internal/issuesync"
+	"quick-ai-toolhub/internal/logging"
 )
 
 type runTaskExecutor interface {
@@ -129,8 +130,9 @@ func runServe(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 
+	logger := logging.InitDefault(stdout)
 	application := app.New(app.Options{
-		Logger: app.NewLogger(stdout),
+		Logger: logger,
 		Config: &cfg,
 	})
 	return application.Bootstrap(ctx)
