@@ -21,9 +21,9 @@
 ## In Scope
 
 - 定义 Agent 调用接口
-- 支持 `codex_exec`、`claude_print`、`opencode_run`
+- 支持 `codex_exec`
 - 支持超时控制和错误归类
-- 显式处理不同 runner 的权限策略
+- 显式处理 `codex_exec` 的权限策略
 - 收集结构化结果和 `artifact_refs`
 - 为不同角色传入统一上下文载荷
 
@@ -50,4 +50,4 @@
 ## Notes
 
 - 该工具应优先为可测试性设计，避免与具体 Agent 提供方强耦合
-- `opencode_run` 没有原生 schema 校验时，需由工具层补做结果验证
+- `v1` 先只实现 `codex_exec`

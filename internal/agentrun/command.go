@@ -5,14 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
 
 type CommandRequest struct {
-	WorkDir string
-	Args    []string
-	Stdin   []byte
+	WorkDir      string
+	Args         []string
+	Stdin        []byte
+	StdoutWriter io.Writer
+	StderrWriter io.Writer
 }
 
 type CommandResult struct {
@@ -37,8 +40,8 @@ func (ExecCommandRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = selectOutputWriter(&stdout, req.StdoutWriter)
+	cmd.Stderr = selectOutputWriter(&stderr, req.StderrWriter)
 
 	err := cmd.Run()
 	result := CommandResult{
@@ -46,8 +49,34 @@ func (ExecCommandRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 		Stderr: stderr.Bytes(),
 	}
 	if err != nil {
-		return result, fmt.Errorf("%s: %w: %s", strings.Join(req.Args, " "), err, strings.TrimSpace(stderr.String()))
+		return result, fmt.Errorf("%s: %w: %s", strings.Join(req.Args, " "), err, formatCommandFailure(stdout.String(), stderr.String()))
 	}
 
 	return result, nil
+}
+
+func selectOutputWriter(buffer *bytes.Buffer, stream io.Writer) io.Writer {
+	if stream == nil {
+		return buffer
+	}
+	return io.MultiWriter(buffer, stream)
+}
+
+func formatCommandFailure(stdout, stderr string) string {
+	var parts []string
+
+	stdout = strings.TrimSpace(stdout)
+	stderr = strings.TrimSpace(stderr)
+
+	if stderr != "" {
+		parts = append(parts, "stderr: "+stderr)
+	}
+	if stdout != "" {
+		parts = append(parts, "stdout: "+stdout)
+	}
+	if len(parts) == 0 {
+		return "no stdout or stderr output"
+	}
+
+	return strings.Join(parts, " | ")
 }

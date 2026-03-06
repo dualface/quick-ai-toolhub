@@ -50,32 +50,33 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	parser := issuesync.Parser{}
 	planData, err := parser.Load(opts.PlanFile, opts.TasksDir)
 	if err != nil {
-		return Result{}, err
+		return Result{}, wrapToolError(ErrorCodePlanLoadFailed, false, "load plan data: %v", err)
 	}
 
 	task, sprint, err := findTask(planData, opts.TaskID)
 	if err != nil {
 		return Result{}, err
 	}
+	applyDefaultContextRefs(&opts, sprint)
 
 	runDir := filepath.Join(outputRoot, filepath.FromSlash(opts.TaskID), e.now().UTC().Format("20060102T150405Z"))
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create run dir: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "create run dir: %v", err)
 	}
 
-	prompt := buildPrompt(opts.AgentType, task, sprint, opts.Attempt)
+	prompt := buildPrompt(opts.AgentType, task, sprint, opts.Attempt, opts.Lens, opts.ContextRefs, opts.WorkDir)
 	promptPath := filepath.Join(runDir, "prompt.md")
 	if err := os.WriteFile(promptPath, []byte(prompt), 0o644); err != nil {
-		return Result{}, fmt.Errorf("write prompt: %w", err)
+		return Result{}, wrapToolError(ErrorCodePromptBuildFailed, false, "write prompt: %v", err)
 	}
 
 	schemaBytes, err := resultSchemaJSON()
 	if err != nil {
-		return Result{}, fmt.Errorf("build schema: %w", err)
+		return Result{}, wrapToolError(ErrorCodeSchemaBuildFailed, false, "build schema: %v", err)
 	}
 	schemaPath := filepath.Join(runDir, "output-schema.json")
 	if err := os.WriteFile(schemaPath, schemaBytes, 0o644); err != nil {
-		return Result{}, fmt.Errorf("write schema: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write schema: %v", err)
 	}
 
 	lastMessagePath := filepath.Join(runDir, "last-message.json")
@@ -84,6 +85,8 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, err
 	}
 	cmdReq.WorkDir = opts.WorkDir
+	cmdReq.StdoutWriter = opts.StreamOutput
+	cmdReq.StderrWriter = opts.StreamOutput
 
 	runCtx := ctx
 	if opts.Timeout > 0 {
@@ -98,23 +101,23 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	stderrPath := filepath.Join(runDir, "stderr.log")
 	combinedLogPath := filepath.Join(runDir, "runner.log")
 	if err := os.WriteFile(stdoutPath, cmdResult.Stdout, 0o644); err != nil {
-		return Result{}, fmt.Errorf("write stdout log: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write stdout log: %v", err)
 	}
 	if err := os.WriteFile(stderrPath, cmdResult.Stderr, 0o644); err != nil {
-		return Result{}, fmt.Errorf("write stderr log: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write stderr log: %v", err)
 	}
 	if err := writeCombinedLog(combinedLogPath, cmdResult.Stdout, cmdResult.Stderr); err != nil {
-		return Result{}, fmt.Errorf("write combined log: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write combined log: %v", err)
 	}
 
 	if runErr != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return Result{}, fmt.Errorf("runner timeout: %w", runErr)
+			return Result{}, wrapToolError(ErrorCodeRunnerTimeout, true, "runner timeout: %v", runErr)
 		}
-		return Result{}, runErr
+		return Result{}, wrapToolError(ErrorCodeRunnerExecution, true, "runner execution failed: %v", runErr)
 	}
 
-	payload, sessionID, err := parseRunnerOutput(opts.Runner, lastMessagePath, cmdResult.Stdout)
+	payload, sessionID, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout)
 	if err != nil {
 		return Result{}, err
 	}
@@ -123,7 +126,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	}
 
 	result := Result{
-		Runner:             opts.Runner,
+		Runner:             RunnerCodexExec,
 		Status:             payload.Status,
 		Summary:            payload.Summary,
 		NextAction:         payload.NextAction,
@@ -137,19 +140,19 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	reportPath := filepath.Join(runDir, "result.json")
 	reportBytes, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		return Result{}, fmt.Errorf("marshal result: %w", err)
+		return Result{}, wrapToolError(ErrorCodeInternalFailure, false, "marshal result: %v", err)
 	}
 	if err := os.WriteFile(reportPath, reportBytes, 0o644); err != nil {
-		return Result{}, fmt.Errorf("write result report: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write result report: %v", err)
 	}
 	result.ArtifactRefs.Report = relOrAbs(opts.WorkDir, reportPath)
 
 	reportBytes, err = json.MarshalIndent(result, "", "  ")
 	if err != nil {
-		return Result{}, fmt.Errorf("marshal final result: %w", err)
+		return Result{}, wrapToolError(ErrorCodeInternalFailure, false, "marshal final result: %v", err)
 	}
 	if err := os.WriteFile(reportPath, reportBytes, 0o644); err != nil {
-		return Result{}, fmt.Errorf("rewrite result report: %w", err)
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "rewrite result report: %v", err)
 	}
 
 	return result, nil
@@ -157,24 +160,15 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 
 func validateOptions(opts *RunOptions) error {
 	if opts.TaskID == "" {
-		return errors.New("missing task id")
+		return newToolError(ErrorCodeInvalidRequest, "missing task id", false)
 	}
-	if opts.Runner == "" {
-		opts.Runner = RunnerCodexExec
-	}
-	switch opts.Runner {
-	case RunnerCodexExec, RunnerClaudePrint, RunnerOpencodeRun:
-	default:
-		return fmt.Errorf("unsupported runner %q", opts.Runner)
-	}
-
 	if opts.AgentType == "" {
 		opts.AgentType = AgentDeveloper
 	}
 	switch opts.AgentType {
 	case AgentDeveloper, AgentQA, AgentReviewer:
 	default:
-		return fmt.Errorf("unsupported agent type %q", opts.AgentType)
+		return wrapToolError(ErrorCodeInvalidRequest, false, "unsupported agent type %q", opts.AgentType)
 	}
 
 	if opts.Attempt <= 0 {
@@ -192,32 +186,52 @@ func validateOptions(opts *RunOptions) error {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 30 * time.Minute
 	}
-	if opts.Runner == RunnerOpencodeRun && strings.TrimSpace(opts.OpencodeAgent) == "" {
-		return errors.New("opencode_run requires --runner-agent")
-	}
 	return nil
 }
 
 func findTask(plan *issuesync.PlanData, taskID string) (*issuesync.TaskBrief, *issuesync.Sprint, error) {
 	task, ok := plan.Tasks[taskID]
 	if !ok {
-		return nil, nil, fmt.Errorf("task %s not found", taskID)
+		return nil, nil, wrapToolError(ErrorCodeTaskNotFound, false, "task %s not found", taskID)
 	}
 	for _, sprint := range plan.Sprints {
 		if sprint.ID == task.SprintID {
 			return task, sprint, nil
 		}
 	}
-	return nil, nil, fmt.Errorf("sprint %s not found for task %s", task.SprintID, taskID)
+	return nil, nil, wrapToolError(ErrorCodeTaskNotFound, false, "sprint %s not found for task %s", task.SprintID, taskID)
+}
+
+func applyDefaultContextRefs(opts *RunOptions, sprint *issuesync.Sprint) {
+	if opts.ContextRefs.SprintID == "" {
+		opts.ContextRefs.SprintID = sprint.ID
+	}
+	if opts.ContextRefs.WorktreePath == "" {
+		opts.ContextRefs.WorktreePath = opts.WorkDir
+	}
+	if opts.ContextRefs.ArtifactRefs.Worktree == "" {
+		opts.ContextRefs.ArtifactRefs.Worktree = "."
+	}
 }
 
 func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (CommandRequest, error) {
-	switch opts.Runner {
-	case RunnerCodexExec:
-		args := []string{
+	args := []string{
+		"codex",
+		"--ask-for-approval", "never",
+		"--sandbox", codexSandbox(opts.AgentType),
+		"exec",
+		"--cd", opts.WorkDir,
+		"--output-schema", schemaPath,
+		"--json",
+		"-o", lastMessagePath,
+		"-",
+	}
+	if opts.Model != "" {
+		args = []string{
 			"codex",
 			"--ask-for-approval", "never",
 			"--sandbox", codexSandbox(opts.AgentType),
+			"--model", opts.Model,
 			"exec",
 			"--cd", opts.WorkDir,
 			"--output-schema", schemaPath,
@@ -225,95 +239,33 @@ func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (
 			"-o", lastMessagePath,
 			"-",
 		}
-		if opts.Model != "" {
-			args = []string{
-				"codex",
-				"--ask-for-approval", "never",
-				"--sandbox", codexSandbox(opts.AgentType),
-				"--model", opts.Model,
-				"exec",
-				"--cd", opts.WorkDir,
-				"--output-schema", schemaPath,
-				"--json",
-				"-o", lastMessagePath,
-				"-",
-			}
-		}
-		return CommandRequest{Args: args, Stdin: []byte(prompt)}, nil
-	case RunnerClaudePrint:
-		schemaJSON := string(mustSchema(schemaPath))
-		args := []string{
-			"claude",
-			"--print",
-			"--output-format", "json",
-			"--json-schema", schemaJSON,
-			"--permission-mode", "dontAsk",
-			"--allowed-tools", claudeAllowedTools(opts.AgentType),
-			prompt,
-		}
-		if opts.Model != "" {
-			args = []string{
-				"claude",
-				"--print",
-				"--output-format", "json",
-				"--json-schema", schemaJSON,
-				"--permission-mode", "dontAsk",
-				"--allowed-tools", claudeAllowedTools(opts.AgentType),
-				"--model", opts.Model,
-				prompt,
-			}
-		}
-		return CommandRequest{Args: args}, nil
-	case RunnerOpencodeRun:
-		args := []string{
-			"opencode", "run",
-			"--dir", opts.WorkDir,
-			"--format", "json",
-			"--agent", opts.OpencodeAgent,
-			prompt,
-		}
-		if opts.Model != "" {
-			args = append([]string{"opencode", "run", "--dir", opts.WorkDir, "--format", "json", "--agent", opts.OpencodeAgent, "--model", opts.Model}, prompt)
-		}
-		return CommandRequest{Args: args}, nil
-	default:
-		return CommandRequest{}, fmt.Errorf("unsupported runner %q", opts.Runner)
 	}
+	return CommandRequest{Args: args, Stdin: []byte(prompt)}, nil
 }
 
-func parseRunnerOutput(runner RunnerID, lastMessagePath string, stdout []byte) (resultPayload, string, error) {
-	switch runner {
-	case RunnerCodexExec:
-		if data, err := os.ReadFile(lastMessagePath); err == nil {
-			if payload, ok := tryDecodePayloadBytes(data); ok {
-				return payload, extractSessionID(stdout), nil
-			}
+func parseRunnerOutput(lastMessagePath string, stdout []byte) (resultPayload, string, error) {
+	if data, err := os.ReadFile(lastMessagePath); err == nil {
+		if payload, ok := tryDecodePayloadBytes(data); ok {
+			return payload, extractSessionID(stdout), nil
 		}
-		payload, ok := tryDecodePayloadBytes(stdout)
-		if !ok {
-			return resultPayload{}, "", errors.New("malformed_output: could not decode codex result")
-		}
-		return payload, extractSessionID(stdout), nil
-	case RunnerClaudePrint, RunnerOpencodeRun:
-		payload, ok := tryDecodePayloadBytes(stdout)
-		if !ok {
-			return resultPayload{}, extractSessionID(stdout), fmt.Errorf("malformed_output: could not decode %s result", runner)
-		}
-		return payload, extractSessionID(stdout), nil
-	default:
-		return resultPayload{}, "", fmt.Errorf("unsupported runner %q", runner)
 	}
+
+	payload, ok := tryDecodePayloadBytes(stdout)
+	if !ok {
+		return resultPayload{}, "", newToolError(ErrorCodeMalformedOutput, "malformed_output: could not decode codex result", true)
+	}
+	return payload, extractSessionID(stdout), nil
 }
 
 func validatePayload(payload resultPayload) error {
 	if strings.TrimSpace(payload.Status) == "" {
-		return errors.New("malformed_output: missing status")
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing status", true)
 	}
 	if strings.TrimSpace(payload.Summary) == "" {
-		return errors.New("malformed_output: missing summary")
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing summary", true)
 	}
 	if strings.TrimSpace(payload.NextAction) == "" {
-		return errors.New("malformed_output: missing next_action")
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing next_action", true)
 	}
 	return nil
 }
@@ -564,17 +516,4 @@ func codexSandbox(agentType AgentType) string {
 		return "read-only"
 	}
 	return "workspace-write"
-}
-
-func claudeAllowedTools(agentType AgentType) string {
-	switch agentType {
-	case AgentDeveloper:
-		return "Bash,Read,Edit"
-	case AgentQA:
-		return "Bash,Read"
-	case AgentReviewer:
-		return "Read"
-	default:
-		return "Read"
-	}
 }

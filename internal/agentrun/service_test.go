@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"quick-ai-toolhub/internal/issuesync"
 )
 
 type fakeCommandRunner struct {
@@ -52,7 +54,6 @@ func TestRunTaskCodexExec(t *testing.T) {
 
 	result, err := executor.RunTask(context.Background(), RunOptions{
 		TaskID:    "Sprint-04/Task-01",
-		Runner:    RunnerCodexExec,
 		AgentType: AgentDeveloper,
 		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
 		TasksDir:  filepath.Join(repo, "plan/tasks"),
@@ -98,7 +99,6 @@ func TestRunTaskReviewerUsesReadOnlySandbox(t *testing.T) {
 	executor := NewExecutor(runner)
 	_, err := executor.RunTask(context.Background(), RunOptions{
 		TaskID:    "Sprint-04/Task-01",
-		Runner:    RunnerCodexExec,
 		AgentType: AgentReviewer,
 		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
 		TasksDir:  filepath.Join(repo, "plan/tasks"),
@@ -106,54 +106,6 @@ func TestRunTaskReviewerUsesReadOnlySandbox(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("run task: %v", err)
-	}
-}
-
-func TestRunTaskClaudePrint(t *testing.T) {
-	repo := setupTestRepo(t)
-	runner := &fakeCommandRunner{
-		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
-			args := strings.Join(req.Args, " ")
-			if !strings.Contains(args, "claude --print --output-format json") {
-				t.Fatalf("unexpected claude args: %s", args)
-			}
-			if !strings.Contains(args, "--permission-mode dontAsk") {
-				t.Fatalf("missing permission mode: %s", args)
-			}
-			return CommandResult{
-				Stdout: []byte(`{"status":"success","summary":"qa passed","next_action":"proceed"}`),
-			}, nil
-		},
-	}
-
-	executor := NewExecutor(runner)
-	_, err := executor.RunTask(context.Background(), RunOptions{
-		TaskID:    "Sprint-04/Task-01",
-		Runner:    RunnerClaudePrint,
-		AgentType: AgentQA,
-		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
-		TasksDir:  filepath.Join(repo, "plan/tasks"),
-		WorkDir:   repo,
-	})
-	if err != nil {
-		t.Fatalf("run task: %v", err)
-	}
-}
-
-func TestRunTaskOpencodeRequiresAgent(t *testing.T) {
-	repo := setupTestRepo(t)
-	executor := NewExecutor(&fakeCommandRunner{})
-
-	_, err := executor.RunTask(context.Background(), RunOptions{
-		TaskID:    "Sprint-04/Task-01",
-		Runner:    RunnerOpencodeRun,
-		AgentType: AgentDeveloper,
-		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
-		TasksDir:  filepath.Join(repo, "plan/tasks"),
-		WorkDir:   repo,
-	})
-	if err == nil || !strings.Contains(err.Error(), "--runner-agent") {
-		t.Fatalf("expected runner-agent error, got %v", err)
 	}
 }
 
@@ -263,5 +215,62 @@ func TestResultSchemaJSONIsValidJSON(t *testing.T) {
 	var value map[string]any
 	if err := json.Unmarshal(schema, &value); err != nil {
 		t.Fatalf("unmarshal schema: %v", err)
+	}
+
+	required := value["required"].([]any)
+	if len(required) != 6 {
+		t.Fatalf("unexpected root required count: %d", len(required))
+	}
+
+	props := value["properties"].(map[string]any)
+	artifactRefs := props["artifact_refs"].(map[string]any)
+	artifactAnyOf := artifactRefs["anyOf"].([]any)
+	artifactObject := artifactAnyOf[1].(map[string]any)
+	artifactRequired := artifactObject["required"].([]any)
+	if len(artifactRequired) != 4 {
+		t.Fatalf("unexpected artifact_refs required count: %d", len(artifactRequired))
+	}
+}
+
+func TestFormatCommandFailureIncludesStdout(t *testing.T) {
+	got := formatCommandFailure("schema error", "warning")
+	if !strings.Contains(got, "stdout: schema error") {
+		t.Fatalf("missing stdout: %s", got)
+	}
+	if !strings.Contains(got, "stderr: warning") {
+		t.Fatalf("missing stderr: %s", got)
+	}
+}
+
+func TestBuildPromptPreservesInlineCodeAndUsesRelativeTaskSource(t *testing.T) {
+	task := &issuesync.TaskBrief{
+		TaskID:             "Sprint-04/Task-01",
+		Goal:               "Goal",
+		Reads:              []string{"`TECH-V1.md`"},
+		InScope:            []string{"收集结构化结果和 `artifact_refs`"},
+		AcceptanceCriteria: []string{"默认 runner 为 `codex_exec`"},
+		Source:             "/repo/plan/tasks/Sprint-04/Task-01.md",
+	}
+	sprint := &issuesync.Sprint{ID: "Sprint-04", Goal: "Sprint Goal"}
+
+	contextRefs := ContextRefs{
+		SprintID:     "Sprint-04",
+		WorktreePath: "/repo",
+	}
+	prompt := buildPrompt(AgentDeveloper, task, sprint, 1, "delivery", contextRefs, "/repo")
+	if !strings.Contains(prompt, "- plan/tasks/Sprint-04/Task-01.md") {
+		t.Fatalf("expected relative task source, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "收集结构化结果和 `artifact_refs`") {
+		t.Fatalf("expected inline code to be preserved, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "默认 runner 为 `codex_exec`") {
+		t.Fatalf("expected inline code in acceptance criteria, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Lens: delivery") {
+		t.Fatalf("expected lens in prompt, got:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "- sprint_id: Sprint-04") {
+		t.Fatalf("expected sprint context in prompt, got:\n%s", prompt)
 	}
 }

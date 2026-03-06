@@ -13,7 +13,7 @@
 - 数据库 schema 真源：[schema.sql](sql/schema.sql)
 - GitHub 集成：统一使用 `gh`；常规操作走 `gh issue`、`gh pr`、`gh run`，缺少一等命令的能力走 `gh api`
 - 本地 Git 操作：直接调用系统 `git` CLI
-- Agent 执行：默认使用 `codex exec`，额外支持 `claude --print` 和 `opencode run`
+- Agent 执行：只使用 `codex exec`
 - HTTP 服务：`net/http`
 - 进程日志：`log/slog`，输出 `stdout`，格式为 `JSON`
 - Sprint 时间线：`logs/<sprint>.log`
@@ -44,14 +44,12 @@
 
 ## Agent CLI 约束
 
-- `run-agent-tool` 默认 runner 为 `codex_exec`
-- `run-agent-tool` 必须支持 `codex_exec`、`claude_print`、`opencode_run`
-- 三种 runner 都必须在目标 task worktree 中执行
+- `run-agent-tool` 固定使用 `codex_exec`
+- `run-agent-tool` 必须在目标 task worktree 中执行
 - `run-agent-tool` 必须显式设置权限策略，不能继承用户本机默认权限配置
 - `developer`、`qa` 默认使用 `workspace_write`
 - `reviewer` 默认使用 `read_only`
-- `codex_exec` 和 `claude_print` 使用 CLI 原生 schema 约束
-- `opencode_run` 由工具层补做 JSON 解析和 schema 校验
+- `codex_exec` 使用 CLI 原生 schema 约束
 - 详细命令约定见 `AGENT-CLI-V1.md`
 
 ## Tool I/O Schema
@@ -299,7 +297,6 @@ response.data:
 
 ```yaml
 request:
-  runner?: codex_exec | claude_print | opencode_run
   agent_type: developer | qa | reviewer
   task_id: string
   attempt: integer
@@ -312,7 +309,7 @@ request:
     artifact_refs?: artifact_refs
 
 response.data:
-  runner: codex_exec | claude_print | opencode_run
+  runner: codex_exec
   status: string
   summary: string
   next_action: string

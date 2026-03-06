@@ -38,8 +38,7 @@
 - 默认配置文件为 `config/config.yaml`
 - GitHub 出站操作统一使用 `gh`
 - 本地 Git 操作统一使用 `git`
-- Agent 默认 runner 使用 `codex exec`
-- `run-agent-tool` 额外支持 `claude --print` 和 `opencode run`
+- Agent 执行只使用 `codex exec`
 - HTTP 服务使用 `net/http`
 - 进程日志使用 `log/slog`，输出 `JSON`
 

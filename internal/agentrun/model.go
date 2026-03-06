@@ -1,13 +1,14 @@
 package agentrun
 
-import "time"
+import (
+	"io"
+	"time"
+)
 
 type RunnerID string
 
 const (
-	RunnerCodexExec   RunnerID = "codex_exec"
-	RunnerClaudePrint RunnerID = "claude_print"
-	RunnerOpencodeRun RunnerID = "opencode_run"
+	RunnerCodexExec RunnerID = "codex_exec"
 )
 
 type AgentType string
@@ -19,17 +20,25 @@ const (
 )
 
 type RunOptions struct {
-	TaskID        string
-	Runner        RunnerID
-	AgentType     AgentType
-	Attempt       int
-	PlanFile      string
-	TasksDir      string
-	WorkDir       string
-	OutputRoot    string
-	Model         string
-	OpencodeAgent string
-	Timeout       time.Duration
+	TaskID       string
+	AgentType    AgentType
+	Attempt      int
+	Lens         string
+	ContextRefs  ContextRefs
+	PlanFile     string
+	TasksDir     string
+	WorkDir      string
+	OutputRoot   string
+	Model        string
+	Timeout      time.Duration
+	StreamOutput io.Writer
+}
+
+type ContextRefs struct {
+	SprintID       string
+	WorktreePath   string
+	GitHubPRNumber int
+	ArtifactRefs   ArtifactRefs
 }
 
 type ArtifactRefs struct {
