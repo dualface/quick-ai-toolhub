@@ -112,7 +112,7 @@ func (s *Syncer) syncSprint(ctx context.Context, sprint *Sprint) error {
 		Source:      sprint.Source,
 		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
-	return nil
+	return s.persistManifest()
 }
 
 func (s *Syncer) syncTask(ctx context.Context, task *TaskBrief) error {
@@ -169,7 +169,7 @@ func (s *Syncer) syncTask(ctx context.Context, task *TaskBrief) error {
 		Source:      task.Source,
 		UpdatedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
-	return nil
+	return s.persistManifest()
 }
 
 func (s *Syncer) syncSubIssues(ctx context.Context, sprint *Sprint, plan *PlanData) error {
@@ -276,6 +276,13 @@ func (s *Syncer) log(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(s.Writer, format+"\n", args...)
+}
+
+func (s *Syncer) persistManifest() error {
+	if !s.Options.Apply || s.Options.ManifestFile == "" {
+		return nil
+	}
+	return s.Manifest.Save(s.Options.ManifestFile)
 }
 
 func defaultLabels() []LabelSpec {
