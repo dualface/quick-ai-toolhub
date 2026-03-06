@@ -41,7 +41,6 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, fmt.Errorf("resolve workdir: %w", err)
 	}
 	opts.WorkDir = absWorkDir
-	opts.ConfigFile = resolveAgainstWorkDir(opts.WorkDir, opts.ConfigFile)
 	opts.PlanFile = resolveAgainstWorkDir(opts.WorkDir, opts.PlanFile)
 	opts.TasksDir = resolveAgainstWorkDir(opts.WorkDir, opts.TasksDir)
 
@@ -256,9 +255,6 @@ func validateOptions(opts *RunOptions) error {
 	}
 	if opts.WorkDir == "" {
 		opts.WorkDir = "."
-	}
-	if opts.ConfigFile == "" {
-		opts.ConfigFile = defaultConfigFile
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 30 * time.Minute

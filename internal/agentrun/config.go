@@ -2,18 +2,14 @@ package agentrun
 
 import (
 	"bytes"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
 
-	"gopkg.in/yaml.v3"
-
+	sharedconfig "quick-ai-toolhub/internal/config"
 	"quick-ai-toolhub/internal/issuesync"
 )
-
-const defaultConfigFile = "config/config.yaml"
 
 type agentSettings struct {
 	DefaultModel string
@@ -24,16 +20,6 @@ type agentProfile struct {
 	Model        string
 	TemplateFile string
 	TemplateBody string
-}
-
-type rawAgentSettings struct {
-	DefaultModel string                     `yaml:"default_model"`
-	Agents       map[string]rawAgentProfile `yaml:"agents"`
-}
-
-type rawAgentProfile struct {
-	Model        string `yaml:"model"`
-	TemplateFile string `yaml:"template_file"`
 }
 
 type promptTemplateData struct {
@@ -57,43 +43,29 @@ type promptTemplateData struct {
 }
 
 func loadAgentSettings(workdir, configFile string) (agentSettings, error) {
-	if strings.TrimSpace(configFile) == "" {
-		configFile = defaultConfigFile
-	}
-
-	configPath := resolveAgainstWorkDir(workdir, configFile)
-	data, err := os.ReadFile(configPath)
+	cfg, err := sharedconfig.Load(workdir, configFile)
 	if err != nil {
-		defaultPath := resolveAgainstWorkDir(workdir, defaultConfigFile)
-		if errors.Is(err, os.ErrNotExist) && filepath.Clean(configPath) == filepath.Clean(defaultPath) {
-			return agentSettings{}, nil
-		}
-		return agentSettings{}, wrapToolError(ErrorCodeConfigLoadFailed, false, "load config: %v", err)
-	}
-
-	var raw rawAgentSettings
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&raw); err != nil {
-		return agentSettings{}, wrapToolError(ErrorCodeConfigLoadFailed, false, "decode config: %v", err)
+		return agentSettings{}, wrapToolError(ErrorCodeConfigLoadFailed, false, "%v", err)
 	}
 
 	settings := agentSettings{
-		DefaultModel: strings.TrimSpace(raw.DefaultModel),
-		Profiles:     make(map[AgentType]agentProfile, len(raw.Agents)),
+		DefaultModel: cfg.DefaultModel,
+		Profiles: map[AgentType]agentProfile{
+			AgentDeveloper: {
+				Model:        cfg.Agents.Developer.Model,
+				TemplateFile: cfg.Agents.Developer.TemplateFile,
+			},
+			AgentQA: {
+				Model:        cfg.Agents.QA.Model,
+				TemplateFile: cfg.Agents.QA.TemplateFile,
+			},
+			AgentReviewer: {
+				Model:        cfg.Agents.Reviewer.Model,
+				TemplateFile: cfg.Agents.Reviewer.TemplateFile,
+			},
+		},
 	}
-	for name, rawProfile := range raw.Agents {
-		agentType := AgentType(strings.TrimSpace(name))
-		switch agentType {
-		case AgentDeveloper, AgentQA, AgentReviewer:
-		default:
-			return agentSettings{}, wrapToolError(ErrorCodeConfigLoadFailed, false, "unknown agent profile %q", name)
-		}
-
-		profile := agentProfile{
-			Model:        strings.TrimSpace(rawProfile.Model),
-			TemplateFile: strings.TrimSpace(rawProfile.TemplateFile),
-		}
+	for agentType, profile := range settings.Profiles {
 		if profile.TemplateFile != "" {
 			templatePath := profile.TemplateFile
 			if !filepath.IsAbs(templatePath) {

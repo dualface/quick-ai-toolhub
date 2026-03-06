@@ -1,3 +1,14 @@
+repo:
+  github_owner: example-owner
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
 default_model: gpt-5.3-codex-spark
 
 agents:
@@ -10,4 +21,3 @@ agents:
   reviewer:
     model: gpt-5.3-codex-spark
     template_file: prompts/agents/reviewer.md
-

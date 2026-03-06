@@ -609,6 +609,17 @@ func setupTestRepo(t *testing.T) string {
 	mustWriteFile(t, filepath.Join(root, "TOOLS-V1.md"), "# TOOLS\n")
 	mustWriteFile(t, filepath.Join(root, "AGENT-CLI-V1.md"), "# AGENT\n")
 	mustWriteFile(t, filepath.Join(root, "config/config.yaml"), strings.TrimSpace(`
+repo:
+  github_owner: example-owner
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
 default_model: gpt-5-codex
 
 agents:

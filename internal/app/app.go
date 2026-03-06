@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 
+	sharedconfig "quick-ai-toolhub/internal/config"
 	toolgit "quick-ai-toolhub/internal/git"
 	toolgithub "quick-ai-toolhub/internal/github"
 	"quick-ai-toolhub/internal/leader"
@@ -15,6 +16,7 @@ import (
 )
 
 type Application struct {
+	config       *sharedconfig.Config
 	logger       *slog.Logger
 	store        *store.Service
 	github       *toolgithub.Client
@@ -26,6 +28,7 @@ type Application struct {
 
 type Options struct {
 	Logger *slog.Logger
+	Config *sharedconfig.Config
 }
 
 func New(opts Options) *Application {
@@ -53,6 +56,7 @@ func New(opts Options) *Application {
 	})
 
 	return &Application{
+		config:       opts.Config,
 		logger:       logger,
 		store:        storeService,
 		github:       githubClient,

@@ -14,6 +14,7 @@ import (
 
 	"quick-ai-toolhub/internal/agentrun"
 	"quick-ai-toolhub/internal/app"
+	sharedconfig "quick-ai-toolhub/internal/config"
 	"quick-ai-toolhub/internal/issuesync"
 )
 
@@ -95,7 +96,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --context-log           Optional upstream context log artifact.")
 	fmt.Fprintln(w, "  --context-patch         Optional upstream context patch artifact.")
 	fmt.Fprintln(w, "  --context-report        Optional upstream context report artifact.")
-	fmt.Fprintln(w, "  --config-file           Path to the repository config file.")
+	fmt.Fprintln(w, "  --config-file           Path to the repository config file. Defaults to CONFIG_FILE or config/config.yaml.")
 	fmt.Fprintln(w, "  --plan-file             Path to the Sprint plan file.")
 	fmt.Fprintln(w, "  --tasks-dir             Path to the task brief directory.")
 	fmt.Fprintln(w, "  --workdir               Repository worktree for agent execution.")
@@ -123,7 +124,15 @@ func runServe(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("serve does not accept positional arguments")
 	}
 
-	application := app.New(app.Options{Logger: app.NewLogger(stdout)})
+	cfg, err := sharedconfig.Load(".", "")
+	if err != nil {
+		return err
+	}
+
+	application := app.New(app.Options{
+		Logger: app.NewLogger(stdout),
+		Config: &cfg,
+	})
 	return application.Bootstrap(ctx)
 }
 
@@ -204,7 +213,7 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fs.StringVar(&opts.ContextRefs.ArtifactRefs.Log, "context-log", "", "optional upstream context log artifact")
 	fs.StringVar(&opts.ContextRefs.ArtifactRefs.Patch, "context-patch", "", "optional upstream context patch artifact")
 	fs.StringVar(&opts.ContextRefs.ArtifactRefs.Report, "context-report", "", "optional upstream context report artifact")
-	fs.StringVar(&opts.ConfigFile, "config-file", "config/config.yaml", "path to repository config")
+	fs.StringVar(&opts.ConfigFile, "config-file", "", "path to repository config")
 	fs.StringVar(&opts.PlanFile, "plan-file", "plan/SPRINTS-V1.md", "path to Sprint plan")
 	fs.StringVar(&opts.TasksDir, "tasks-dir", "plan/tasks", "path to task brief directory")
 	fs.StringVar(&opts.WorkDir, "workdir", ".", "repository worktree for agent execution")
