@@ -54,7 +54,7 @@ Sprint-01
 
 ### `Global Leader` 职责
 
-- 读取 `project-developer-guide`
+- 读取 `PROJECT-DEVELOPER-GUIDE.md`
 - 使用 `get-task-list-tool` 获取并筛选 `task-list`
 - 选择下一个要执行的 `Sprint`，并按顺序选择该 `Sprint` 中的下一个 `Task`
 - 调用 `prepare-worktree-tool` 为 task 创建独立的 Git worktree 和分支
@@ -67,7 +67,7 @@ Sprint-01
 ### `Task Orchestrator` 职责
 
 - 只服务于单个 task
-- 读取 `project-developer-guide`、所属 `Sprint` 上下文和 task
+- 读取 `PROJECT-DEVELOPER-GUIDE.md`、所属 `Sprint` 上下文和 task
 - 维护该 task 的阶段状态与执行日志
 - 在 task 范围内启动 `Developer`、`QA`、`Reviewer`
 - 作为 task 内唯一的流程控制器，根据 Agent 返回结果决定下一步
@@ -270,7 +270,7 @@ Sprint-01
                v
 +------------------------------+
 | Global Leader                |
-| reads project-developer-guide|
+| reads PROJECT-DEVELOPER-GUIDE.md|
 +--------------+---------------+
                |
                v
@@ -516,13 +516,13 @@ Sprint-01
 ## 核心流程
 
 1. 持续运行的系统启动 `Global Leader`
-2. `Global Leader` 读取 `project-developer-guide`
+2. `Global Leader` 读取 `PROJECT-DEVELOPER-GUIDE.md`
 3. `Global Leader` 使用 `get-task-list-tool` 获取 `task-list`
 4. `Global Leader` 选择一个 `Sprint`，并按顺序挑选该 `Sprint` 中下一个未完成的 `Task`
 5. 如果该 `Sprint` 尚未初始化，则先创建对应的 `Sprint Branch`
 6. `Global Leader` 调用 `prepare-worktree-tool`，从该 `Sprint Branch` 的最新代码为当前 `Task` 创建独立的 Git worktree 和 task 分支
 7. `Global Leader` 为该 `Task` 启动一个 `Task Orchestrator`
-8. `Task Orchestrator` 读取 `project-developer-guide`、`Sprint` 上下文和 task，并开始该 task 的局部执行循环
+8. `Task Orchestrator` 读取 `PROJECT-DEVELOPER-GUIDE.md`、`Sprint` 上下文和 task，并开始该 task 的局部执行循环
 9. `Task Orchestrator` 启动 `Developer`
 10. `Developer` 开发任务并完成自测，然后将结构化结果返回给 `Task Orchestrator`
 11. `Task Orchestrator` 根据 `Developer` 的结果决定是继续修复、进入 `QA`，还是直接标记为 `blocked`
