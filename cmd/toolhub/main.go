@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"quick-ai-toolhub/internal/agentrun"
@@ -87,6 +88,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --context-log           Optional upstream context log artifact.")
 	fmt.Fprintln(w, "  --context-patch         Optional upstream context patch artifact.")
 	fmt.Fprintln(w, "  --context-report        Optional upstream context report artifact.")
+	fmt.Fprintln(w, "  --config-file           Path to the repository config file.")
 	fmt.Fprintln(w, "  --plan-file             Path to the Sprint plan file.")
 	fmt.Fprintln(w, "  --tasks-dir             Path to the task brief directory.")
 	fmt.Fprintln(w, "  --workdir               Repository worktree for agent execution.")
@@ -94,6 +96,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --timeout               Timeout duration, e.g. 30m.")
 	fmt.Fprintln(w, "  --model                 Optional runner model override.")
 	fmt.Fprintln(w, "  --stream                Stream live agent output to stderr.")
+	fmt.Fprintln(w, "  --no-progress           Disable low-noise progress updates to stderr.")
 }
 
 func runSyncIssues(ctx context.Context, args []string, stdout io.Writer) error {
@@ -165,6 +168,7 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	var opts agentrun.RunOptions
 	var timeout time.Duration
 	var stream bool
+	var noProgress bool
 	fs.StringVar((*string)(&opts.AgentType), "agent-type", string(agentrun.AgentDeveloper), "agent type")
 	fs.IntVar(&opts.Attempt, "attempt", 1, "attempt number")
 	fs.StringVar(&opts.Lens, "lens", "", "optional execution lens")
@@ -172,6 +176,7 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fs.StringVar(&opts.ContextRefs.ArtifactRefs.Log, "context-log", "", "optional upstream context log artifact")
 	fs.StringVar(&opts.ContextRefs.ArtifactRefs.Patch, "context-patch", "", "optional upstream context patch artifact")
 	fs.StringVar(&opts.ContextRefs.ArtifactRefs.Report, "context-report", "", "optional upstream context report artifact")
+	fs.StringVar(&opts.ConfigFile, "config-file", "config/config.yaml", "path to repository config")
 	fs.StringVar(&opts.PlanFile, "plan-file", "plan/SPRINTS-V1.md", "path to Sprint plan")
 	fs.StringVar(&opts.TasksDir, "tasks-dir", "plan/tasks", "path to task brief directory")
 	fs.StringVar(&opts.WorkDir, "workdir", ".", "repository worktree for agent execution")
@@ -179,13 +184,18 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "runner timeout")
 	fs.StringVar(&opts.Model, "model", "", "optional model override")
 	fs.BoolVar(&stream, "stream", false, "stream live agent output to stderr")
+	fs.BoolVar(&noProgress, "no-progress", false, "disable low-noise progress updates to stderr")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			printUsage(stdout)
 			return nil
 		}
-		return writeErrorResponse(stdout, agentrun.AsToolError(err), 2)
+		return writeErrorResponse(stdout, &agentrun.ToolError{
+			Code:      agentrun.ErrorCodeInvalidRequest,
+			Message:   err.Error(),
+			Retryable: false,
+		}, 2, stream)
 	}
 
 	if taskID == "" {
@@ -194,7 +204,7 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 				Code:      agentrun.ErrorCodeInvalidRequest,
 				Message:   "run-task requires exactly one task id argument",
 				Retryable: false,
-			}, 2)
+			}, 2, stream)
 		}
 		taskID = fs.Arg(0)
 	} else if fs.NArg() != 0 {
@@ -202,17 +212,19 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			Code:      agentrun.ErrorCodeInvalidRequest,
 			Message:   "run-task accepts flags only after the task id",
 			Retryable: false,
-		}, 2)
+		}, 2, stream)
 	}
 	opts.TaskID = taskID
 	opts.Timeout = timeout
 	if stream {
 		opts.StreamOutput = stderr
+	} else if !noProgress {
+		opts.ProgressOutput = stderr
 	}
 
 	absWorkDir, err := filepath.Abs(opts.WorkDir)
 	if err != nil {
-		return writeErrorResponse(stdout, agentrun.AsToolError(fmt.Errorf("resolve workdir: %w", err)), 1)
+		return writeErrorResponse(stdout, agentrun.AsToolError(fmt.Errorf("resolve workdir: %w", err)), 1, stream)
 	}
 	opts.WorkDir = absWorkDir
 	opts.ContextRefs.WorktreePath = absWorkDir
@@ -220,18 +232,29 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	executor := newRunTaskExecutor()
 	result, err := executor.RunTask(ctx, opts)
 	if err != nil {
-		return writeErrorResponse(stdout, agentrun.AsToolError(err), 1)
+		return writeErrorResponse(stdout, agentrun.AsToolError(err), 1, stream)
 	}
 
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(commandResponse{
-		OK:   true,
-		Data: &result,
-	})
+	if stream {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(commandResponse{
+			OK:   true,
+			Data: &result,
+		})
+	}
+
+	return writeHumanResult(stdout, taskID, result)
 }
 
-func writeErrorResponse(stdout io.Writer, toolErr *agentrun.ToolError, exitCode int) error {
+func writeErrorResponse(stdout io.Writer, toolErr *agentrun.ToolError, exitCode int, jsonOutput bool) error {
+	if !jsonOutput {
+		if err := writeHumanError(stdout, toolErr); err != nil {
+			return err
+		}
+		return &cliExitError{code: exitCode}
+	}
+
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(commandResponse{
@@ -241,4 +264,64 @@ func writeErrorResponse(stdout io.Writer, toolErr *agentrun.ToolError, exitCode 
 		return err
 	}
 	return &cliExitError{code: exitCode}
+}
+
+func writeHumanResult(w io.Writer, taskID string, result agentrun.Result) error {
+	fmt.Fprintf(w, "Task: %s\n", taskID)
+	fmt.Fprintf(w, "Runner: %s\n", result.Runner)
+	fmt.Fprintf(w, "Status: %s\n", result.Status)
+	fmt.Fprintf(w, "Next: %s\n", result.NextAction)
+	if result.FailureFingerprint != "" {
+		fmt.Fprintf(w, "Failure Fingerprint: %s\n", result.FailureFingerprint)
+	}
+	if result.SessionID != "" {
+		fmt.Fprintf(w, "Session: %s\n", result.SessionID)
+	}
+	if strings.TrimSpace(result.Summary) != "" {
+		fmt.Fprintf(w, "\nSummary:\n%s\n", result.Summary)
+	}
+	if refs := formatArtifactRefs(result.ArtifactRefs); refs != "" {
+		fmt.Fprintf(w, "\nArtifacts:\n%s", refs)
+	}
+	if len(result.Findings) > 0 {
+		fmt.Fprintf(w, "\nFindings (%d):\n", len(result.Findings))
+		for i, finding := range result.Findings {
+			severity := finding.Severity
+			if severity == "" {
+				severity = "unknown"
+			}
+			fmt.Fprintf(w, "%d. [%s] %s\n", i+1, severity, finding.Summary)
+			if finding.SuggestedAction != "" {
+				fmt.Fprintf(w, "   Action: %s\n", finding.SuggestedAction)
+			}
+		}
+	}
+	return nil
+}
+
+func writeHumanError(w io.Writer, toolErr *agentrun.ToolError) error {
+	if toolErr == nil {
+		return nil
+	}
+	fmt.Fprintf(w, "Error: %s\n", toolErr.Code)
+	fmt.Fprintf(w, "Message: %s\n", toolErr.Message)
+	fmt.Fprintf(w, "Retryable: %t\n", toolErr.Retryable)
+	return nil
+}
+
+func formatArtifactRefs(refs agentrun.ArtifactRefs) string {
+	var b strings.Builder
+	if refs.Log != "" {
+		fmt.Fprintf(&b, "- log: %s\n", refs.Log)
+	}
+	if refs.Worktree != "" {
+		fmt.Fprintf(&b, "- worktree: %s\n", refs.Worktree)
+	}
+	if refs.Patch != "" {
+		fmt.Fprintf(&b, "- patch: %s\n", refs.Patch)
+	}
+	if refs.Report != "" {
+		fmt.Fprintf(&b, "- report: %s\n", refs.Report)
+	}
+	return b.String()
 }

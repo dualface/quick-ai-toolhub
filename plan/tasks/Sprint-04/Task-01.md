@@ -12,6 +12,7 @@
 - `TOOLS-V1.md`
 - `AGENT-CLI-V1.md`
 - `plan/SPRINTS-V1.md`
+- `plan/tasks/Sprint-04/Task-01-CHECKLIST.md`
 
 ## Dependencies
 
@@ -51,3 +52,4 @@
 
 - 该工具应优先为可测试性设计，避免与具体 Agent 提供方强耦合
 - `v1` 先只实现 `codex_exec`
+- 进入 `QA` 前先完整执行 `Task-01-CHECKLIST.md`

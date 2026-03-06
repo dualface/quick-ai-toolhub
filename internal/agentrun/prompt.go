@@ -9,7 +9,7 @@ import (
 	"quick-ai-toolhub/internal/issuesync"
 )
 
-func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesync.Sprint, attempt int, lens string, contextRefs ContextRefs, workdir string) string {
+func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesync.Sprint, attempt int, lens string, contextRefs ContextRefs, workdir, roleInstructions string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "You are acting as the %s agent for task %s.\n\n", agentType, task.TaskID)
@@ -60,20 +60,13 @@ func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesy
 	}
 	b.WriteString("\n")
 
-	switch agentType {
-	case AgentDeveloper:
-		b.WriteString("Role rules:\n")
-		b.WriteString("- Implement the task end-to-end within scope.\n")
-		b.WriteString("- Run the smallest relevant validation before finishing.\n")
-	case AgentQA:
-		b.WriteString("Role rules:\n")
-		b.WriteString("- Validate the current implementation.\n")
-		b.WriteString("- Focus on build, test, and lint behavior.\n")
-		b.WriteString("- Do not make unrelated code changes.\n")
-	case AgentReviewer:
-		b.WriteString("Role rules:\n")
-		b.WriteString("- Review the current state and report findings.\n")
-		b.WriteString("- Do not modify files.\n")
+	if strings.TrimSpace(roleInstructions) == "" {
+		roleInstructions = defaultRoleInstructions(agentType)
+	}
+	b.WriteString("Role instructions:\n")
+	b.WriteString(roleInstructions)
+	if !strings.HasSuffix(roleInstructions, "\n") {
+		b.WriteString("\n")
 	}
 	b.WriteString("- Respect the repository rules in PROJECT-DEVELOPER-GUIDE.md.\n")
 	b.WriteString("- Final output must be a single JSON object matching the provided schema.\n")
@@ -139,6 +132,32 @@ func relativeToWorkdir(workdir, path string) string {
 		return filepath.ToSlash(path)
 	}
 	return filepath.ToSlash(rel)
+}
+
+func defaultRoleInstructions(agentType AgentType) string {
+	switch agentType {
+	case AgentDeveloper:
+		return strings.Join([]string{
+			"- Implement the task end-to-end within scope.",
+			"- Run the smallest relevant validation before finishing.",
+		}, "\n")
+	case AgentQA:
+		return strings.Join([]string{
+			"- Validate the current implementation.",
+			"- Focus on build, test, and lint behavior.",
+			"- Use the provided repo-local temp/cache environment for Go commands instead of relying on /tmp defaults.",
+			"- Prefer repository-defined validation commands; do not block solely because a global lint tool is absent unless the repository explicitly requires it.",
+			"- If environment limits prevent a check from running, report that as a verification gap, not as a code defect.",
+			"- Do not make unrelated code changes.",
+		}, "\n")
+	case AgentReviewer:
+		return strings.Join([]string{
+			"- Review the current state and report findings.",
+			"- Do not modify files.",
+		}, "\n")
+	default:
+		return ""
+	}
 }
 
 func resultSchemaJSON() ([]byte, error) {

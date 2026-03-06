@@ -47,6 +47,9 @@
 - `run-agent-tool` 固定使用 `codex_exec`
 - `run-agent-tool` 必须在目标 task worktree 中执行
 - `run-agent-tool` 必须显式设置权限策略，不能继承用户本机默认权限配置
+- `run-agent-tool` 默认从 `config/config.yaml` 读取 Agent 配置
+- 不同 `agent_type` 的默认模型和 prompt template 由 `config/config.yaml` + `prompts/agents/*.md` 定义
+- 模型优先级为：CLI 显式覆盖 > `agents.<agent_type>.model` > `default_model`
 - `developer`、`qa` 默认使用 `workspace_write`
 - `reviewer` 默认使用 `read_only`
 - `codex_exec` 使用 CLI 原生 schema 约束
@@ -301,6 +304,8 @@ request:
   task_id: string
   attempt: integer
   lens?: string
+  model?: string
+  config_file?: string
   timeout_seconds?: integer
   context_refs:
     sprint_id: string

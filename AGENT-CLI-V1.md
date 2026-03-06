@@ -36,11 +36,14 @@ codex exec \
 
 - prompt 可以从 `stdin` 输入
 - 需要续跑时使用 `codex exec resume`
+- 默认模型和角色 prompt template 由 `config/config.yaml` + `prompts/agents/*.md` 提供
 
 ## `run-agent-tool` 实现要求
 
 - runner 固定为 `codex_exec`
 - 命令必须在 task worktree 中执行
+- 角色 prompt 由固定骨架 prompt + `prompts/agents/<agent_type>.md` 模板共同组成
+- CLI 未显式传 `--model` 时，默认模型从 `config/config.yaml` 读取
 - 调用层统一传入同一份目标 schema
 - 依赖 `codex exec` 原生 schema 约束
 - 任一 runner 返回非结构化结果时，统一映射为 `malformed_output`

@@ -20,18 +20,20 @@ const (
 )
 
 type RunOptions struct {
-	TaskID       string
-	AgentType    AgentType
-	Attempt      int
-	Lens         string
-	ContextRefs  ContextRefs
-	PlanFile     string
-	TasksDir     string
-	WorkDir      string
-	OutputRoot   string
-	Model        string
-	Timeout      time.Duration
-	StreamOutput io.Writer
+	TaskID         string
+	AgentType      AgentType
+	Attempt        int
+	Lens           string
+	ContextRefs    ContextRefs
+	ConfigFile     string
+	PlanFile       string
+	TasksDir       string
+	WorkDir        string
+	OutputRoot     string
+	Model          string
+	Timeout        time.Duration
+	StreamOutput   io.Writer
+	ProgressOutput io.Writer
 }
 
 type ContextRefs struct {
@@ -73,10 +75,16 @@ type Result struct {
 }
 
 type resultPayload struct {
-	Status             string       `json:"status"`
-	Summary            string       `json:"summary"`
-	NextAction         string       `json:"next_action"`
-	FailureFingerprint string       `json:"failure_fingerprint,omitempty"`
-	ArtifactRefs       ArtifactRefs `json:"artifact_refs,omitempty"`
-	Findings           []Finding    `json:"findings,omitempty"`
+	Status                  string       `json:"status"`
+	Summary                 string       `json:"summary"`
+	NextAction              string       `json:"next_action"`
+	FailureFingerprint      string       `json:"failure_fingerprint,omitempty"`
+	ArtifactRefs            ArtifactRefs `json:"artifact_refs,omitempty"`
+	Findings                []Finding    `json:"findings,omitempty"`
+	HasFailureFingerprint   bool         `json:"-"`
+	FailureFingerprintValid bool         `json:"-"`
+	HasArtifactRefs         bool         `json:"-"`
+	ArtifactRefsValid       bool         `json:"-"`
+	HasFindings             bool         `json:"-"`
+	FindingsValid           bool         `json:"-"`
 }

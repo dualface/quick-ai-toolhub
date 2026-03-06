@@ -10,6 +10,7 @@
 - `SPEC-V1.md`：`v1` 行为规格、数据模型、同步规则和边界
 - `TECH-V1.md`：技术选型、工具 schema、实现约束
 - `TOOLS-V1.md`：工具清单和实现顺序
+- `ENV-PREP-V1.md`：本机环境准备和外部工具要求
 - `plan/SPRINTS-V1.md`：`Sprint` / `Task` 拆解
 - 当前 `Task` brief：该任务的目标、范围、交付物和验收标准
 - `sql/schema.sql`：数据库结构真源
@@ -36,11 +37,15 @@
 - 数据库访问使用 `Bun`
 - 配置文件统一使用 `YAML`
 - 默认配置文件为 `config/config.yaml`
+- Agent 角色配置从 `config/config.yaml` 读取
+- Agent prompt template 放在 `prompts/agents/`
 - GitHub 出站操作统一使用 `gh`
 - 本地 Git 操作统一使用 `git`
 - Agent 执行只使用 `codex exec`
 - HTTP 服务使用 `net/http`
 - 进程日志使用 `log/slog`，输出 `JSON`
+
+进入具体实现前，先按 `ENV-PREP-V1.md` 确认本机环境满足要求。
 
 ## GitHub 与 Git 约束
 
@@ -80,6 +85,8 @@ sql/
   schema.sql
 config/
   config.yaml
+prompts/
+  agents/
 plan/
 ```
 
@@ -96,6 +103,7 @@ plan/
 - 每个 `Task` 至少验证与本次改动直接相关的行为
 - 修改数据库或 store 逻辑时，优先补充对应单元测试
 - 修改 schema 时，至少验证 `sql/schema.sql` 可以被 `sqlite3` 正常执行
+- 如果当前 `Task` 附带 checklist，进入 `QA` 前必须先完成该 checklist
 - 如果存在未运行的测试或未验证的风险，必须在结果中明确说明
 
 ## Agent 执行输入

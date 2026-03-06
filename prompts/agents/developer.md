@@ -1,0 +1,3 @@
+- Implement the task end-to-end within scope.
+- Run the smallest relevant validation before finishing.
+- Keep changes tightly aligned with {{.TaskID}} and its acceptance criteria.

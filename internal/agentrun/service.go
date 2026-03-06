@@ -3,9 +3,12 @@ package agentrun
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,12 +20,14 @@ import (
 type Executor struct {
 	runner CommandRunner
 	now    func() time.Time
+	runID  func() string
 }
 
 func NewExecutor(runner CommandRunner) *Executor {
 	return &Executor{
 		runner: runner,
 		now:    time.Now,
+		runID:  defaultRunID,
 	}
 }
 
@@ -36,6 +41,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, fmt.Errorf("resolve workdir: %w", err)
 	}
 	opts.WorkDir = absWorkDir
+	opts.ConfigFile = resolveAgainstWorkDir(opts.WorkDir, opts.ConfigFile)
 	opts.PlanFile = resolveAgainstWorkDir(opts.WorkDir, opts.PlanFile)
 	opts.TasksDir = resolveAgainstWorkDir(opts.WorkDir, opts.TasksDir)
 
@@ -59,12 +65,28 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	}
 	applyDefaultContextRefs(&opts, sprint)
 
-	runDir := filepath.Join(outputRoot, filepath.FromSlash(opts.TaskID), e.now().UTC().Format("20060102T150405Z"))
+	settings, err := loadAgentSettings(opts.WorkDir, opts.ConfigFile)
+	if err != nil {
+		return Result{}, err
+	}
+	if opts.Model == "" {
+		opts.Model = settings.defaultModelFor(opts.AgentType)
+	}
+	roleInstructions, err := settings.roleInstructions(opts.AgentType, task, sprint, opts.Attempt, opts.Lens, opts.ContextRefs, opts.WorkDir)
+	if err != nil {
+		return Result{}, err
+	}
+
+	runDir := buildRunDir(outputRoot, opts.TaskID, opts.AgentType, opts.Lens, opts.Attempt, e.now().UTC(), e.runID())
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "create run dir: %v", err)
 	}
+	runnerOutputDir, err := buildRunnerOutputDir(opts.WorkDir, outputRoot, runDir, opts.AgentType)
+	if err != nil {
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "create runner output dir: %v", err)
+	}
 
-	prompt := buildPrompt(opts.AgentType, task, sprint, opts.Attempt, opts.Lens, opts.ContextRefs, opts.WorkDir)
+	prompt := buildPrompt(opts.AgentType, task, sprint, opts.Attempt, opts.Lens, opts.ContextRefs, opts.WorkDir, roleInstructions)
 	promptPath := filepath.Join(runDir, "prompt.md")
 	if err := os.WriteFile(promptPath, []byte(prompt), 0o644); err != nil {
 		return Result{}, wrapToolError(ErrorCodePromptBuildFailed, false, "write prompt: %v", err)
@@ -79,14 +101,19 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write schema: %v", err)
 	}
 
-	lastMessagePath := filepath.Join(runDir, "last-message.json")
+	lastMessagePath := filepath.Join(runnerOutputDir, "last-message.json")
 	cmdReq, err := buildCommand(opts, prompt, schemaPath, lastMessagePath)
 	if err != nil {
 		return Result{}, err
 	}
 	cmdReq.WorkDir = opts.WorkDir
+	cmdReq.Env, err = buildCommandEnv(opts.WorkDir, opts.AgentType)
+	if err != nil {
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "prepare command env: %v", err)
+	}
 	cmdReq.StdoutWriter = opts.StreamOutput
 	cmdReq.StderrWriter = opts.StreamOutput
+	cmdReq.ProgressWriter = opts.ProgressOutput
 
 	runCtx := ctx
 	if opts.Timeout > 0 {
@@ -94,12 +121,15 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		runCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
+	stopHeartbeat := startProgressHeartbeat(runCtx, opts.ProgressOutput, 30*time.Second)
+	defer stopHeartbeat()
 
 	cmdResult, runErr := e.runner.Run(runCtx, cmdReq)
 
 	stdoutPath := filepath.Join(runDir, "stdout.log")
 	stderrPath := filepath.Join(runDir, "stderr.log")
 	combinedLogPath := filepath.Join(runDir, "runner.log")
+	reportPath := filepath.Join(runDir, "result.json")
 	if err := os.WriteFile(stdoutPath, cmdResult.Stdout, 0o644); err != nil {
 		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write stdout log: %v", err)
 	}
@@ -110,49 +140,86 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write combined log: %v", err)
 	}
 
+	result := Result{
+		Runner:    RunnerCodexExec,
+		SessionID: extractSessionID(cmdResult.Stdout),
+	}
+
 	if runErr != nil {
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return Result{}, wrapToolError(ErrorCodeRunnerTimeout, true, "runner timeout: %v", runErr)
+		if payload, sessionID, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout); err == nil {
+			if err := validatePayload(payload); err == nil {
+				result = resultFromPayload(payload, sessionID)
+				if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+					return Result{}, err
+				}
+				return result, nil
+			} else if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
+				result.Status = "failed"
+				result.Summary = "codex_exec did not return a valid structured result"
+				result.NextAction = "retry"
+				result.FailureFingerprint = ErrorCodeMalformedOutput
+				if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+					return Result{}, err
+				}
+				return result, nil
+			}
+		} else if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
+			result.Status = "failed"
+			result.Summary = "codex_exec did not return a valid structured result"
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeMalformedOutput
+			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+				return Result{}, err
+			}
+			return result, nil
 		}
-		return Result{}, wrapToolError(ErrorCodeRunnerExecution, true, "runner execution failed: %v", runErr)
+
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			result.Status = "failed"
+			result.Summary = "codex_exec timed out before producing a structured result"
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeRunnerTimeout
+			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+				return Result{}, err
+			}
+			return result, nil
+		}
+
+		result.Status = "failed"
+		result.Summary = "codex_exec failed before producing a structured result"
+		result.NextAction = "retry"
+		result.FailureFingerprint = ErrorCodeRunnerExecution
+		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+			return Result{}, err
+		}
+		return result, nil
 	}
 
 	payload, sessionID, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout)
 	if err != nil {
-		return Result{}, err
+		result.Status = "failed"
+		result.Summary = "codex_exec did not return a valid structured result"
+		result.NextAction = "retry"
+		result.FailureFingerprint = ErrorCodeMalformedOutput
+		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+			return Result{}, err
+		}
+		return result, nil
 	}
 	if err := validatePayload(payload); err != nil {
+		result.Status = "failed"
+		result.Summary = "codex_exec did not return a valid structured result"
+		result.NextAction = "retry"
+		result.FailureFingerprint = ErrorCodeMalformedOutput
+		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+			return Result{}, err
+		}
+		return result, nil
+	}
+
+	result = resultFromPayload(payload, sessionID)
+	if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
 		return Result{}, err
-	}
-
-	result := Result{
-		Runner:             RunnerCodexExec,
-		Status:             payload.Status,
-		Summary:            payload.Summary,
-		NextAction:         payload.NextAction,
-		FailureFingerprint: payload.FailureFingerprint,
-		SessionID:          sessionID,
-		ArtifactRefs:       payload.ArtifactRefs,
-		Findings:           payload.Findings,
-	}
-	applyDefaultArtifactRefs(&result, opts.WorkDir, combinedLogPath)
-
-	reportPath := filepath.Join(runDir, "result.json")
-	reportBytes, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return Result{}, wrapToolError(ErrorCodeInternalFailure, false, "marshal result: %v", err)
-	}
-	if err := os.WriteFile(reportPath, reportBytes, 0o644); err != nil {
-		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write result report: %v", err)
-	}
-	result.ArtifactRefs.Report = relOrAbs(opts.WorkDir, reportPath)
-
-	reportBytes, err = json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return Result{}, wrapToolError(ErrorCodeInternalFailure, false, "marshal final result: %v", err)
-	}
-	if err := os.WriteFile(reportPath, reportBytes, 0o644); err != nil {
-		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "rewrite result report: %v", err)
 	}
 
 	return result, nil
@@ -182,6 +249,9 @@ func validateOptions(opts *RunOptions) error {
 	}
 	if opts.WorkDir == "" {
 		opts.WorkDir = "."
+	}
+	if opts.ConfigFile == "" {
+		opts.ConfigFile = defaultConfigFile
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 30 * time.Minute
@@ -219,18 +289,28 @@ func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (
 		"codex",
 		"--ask-for-approval", "never",
 		"--sandbox", codexSandbox(opts.AgentType),
+	}
+	for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
+		args = append(args, "--add-dir", dir)
+	}
+	args = append(args,
 		"exec",
 		"--cd", opts.WorkDir,
 		"--output-schema", schemaPath,
 		"--json",
 		"-o", lastMessagePath,
 		"-",
-	}
+	)
 	if opts.Model != "" {
 		args = []string{
 			"codex",
 			"--ask-for-approval", "never",
 			"--sandbox", codexSandbox(opts.AgentType),
+		}
+		for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
+			args = append(args, "--add-dir", dir)
+		}
+		args = append(args,
 			"--model", opts.Model,
 			"exec",
 			"--cd", opts.WorkDir,
@@ -238,9 +318,33 @@ func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (
 			"--json",
 			"-o", lastMessagePath,
 			"-",
-		}
+		)
 	}
 	return CommandRequest{Args: args, Stdin: []byte(prompt)}, nil
+}
+
+func buildCommandEnv(workdir string, agentType AgentType) ([]string, error) {
+	env := os.Environ()
+	if agentType == AgentReviewer {
+		return env, nil
+	}
+
+	baseDir := filepath.Join(workdir, ".toolhub", "runtime")
+	tmpDir := filepath.Join(baseDir, "tmp")
+	goBuildDir := filepath.Join(baseDir, "go-build")
+	goCacheDir := filepath.Join(baseDir, "go-cache")
+	for _, dir := range []string{tmpDir, goBuildDir, goCacheDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+
+	env = upsertEnv(env, "TMPDIR", tmpDir)
+	env = upsertEnv(env, "TMP", tmpDir)
+	env = upsertEnv(env, "TEMP", tmpDir)
+	env = upsertEnv(env, "GOTMPDIR", goBuildDir)
+	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	return env, nil
 }
 
 func parseRunnerOutput(lastMessagePath string, stdout []byte) (resultPayload, string, error) {
@@ -266,6 +370,24 @@ func validatePayload(payload resultPayload) error {
 	}
 	if strings.TrimSpace(payload.NextAction) == "" {
 		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing next_action", true)
+	}
+	if !payload.HasFailureFingerprint {
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing failure_fingerprint", true)
+	}
+	if !payload.FailureFingerprintValid {
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: invalid failure_fingerprint", true)
+	}
+	if !payload.HasArtifactRefs {
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing artifact_refs", true)
+	}
+	if !payload.ArtifactRefsValid {
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: invalid artifact_refs", true)
+	}
+	if !payload.HasFindings {
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing findings", true)
+	}
+	if !payload.FindingsValid {
+		return newToolError(ErrorCodeMalformedOutput, "malformed_output: invalid findings", true)
 	}
 	return nil
 }
@@ -297,11 +419,6 @@ func tryDecodePayloadBytes(raw []byte) (resultPayload, bool) {
 }
 
 func decodePayload(raw []byte) (resultPayload, bool) {
-	var payload resultPayload
-	if err := json.Unmarshal(raw, &payload); err == nil && payload.Status != "" && payload.Summary != "" && payload.NextAction != "" {
-		return payload, true
-	}
-
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return resultPayload{}, false
@@ -345,35 +462,66 @@ func payloadFromMap(v map[string]any) (resultPayload, bool) {
 		Summary:    summary,
 		NextAction: nextAction,
 	}
-	if value, ok := getString(v, "failure_fingerprint"); ok {
-		payload.FailureFingerprint = value
-	}
-	if refs, ok := v["artifact_refs"].(map[string]any); ok {
-		payload.ArtifactRefs = ArtifactRefs{
-			Log:      getStringOrEmpty(refs, "log"),
-			Worktree: getStringOrEmpty(refs, "worktree"),
-			Patch:    getStringOrEmpty(refs, "patch"),
-			Report:   getStringOrEmpty(refs, "report"),
+	if raw, ok := v["failure_fingerprint"]; ok {
+		payload.HasFailureFingerprint = true
+		payload.FailureFingerprintValid = true
+		if raw != nil {
+			value, ok := raw.(string)
+			if !ok {
+				payload.FailureFingerprintValid = false
+			} else {
+				payload.FailureFingerprint = value
+			}
 		}
 	}
-	if findings, ok := v["findings"].([]any); ok {
-		for _, item := range findings {
-			entry, ok := item.(map[string]any)
-			if !ok {
-				continue
+	if raw, ok := v["artifact_refs"]; ok {
+		payload.HasArtifactRefs = true
+		payload.ArtifactRefsValid = true
+		switch refs := raw.(type) {
+		case nil:
+		case map[string]any:
+			if !hasKeys(refs, "log", "worktree", "patch", "report") {
+				payload.ArtifactRefsValid = false
+			} else {
+				logValue, logOK := getNullableString(refs, "log")
+				worktreeValue, worktreeOK := getNullableString(refs, "worktree")
+				patchValue, patchOK := getNullableString(refs, "patch")
+				reportValue, reportOK := getNullableString(refs, "report")
+				payload.ArtifactRefsValid = logOK && worktreeOK && patchOK && reportOK
+				if payload.ArtifactRefsValid {
+					payload.ArtifactRefs = ArtifactRefs{
+						Log:      logValue,
+						Worktree: worktreeValue,
+						Patch:    patchValue,
+						Report:   reportValue,
+					}
+				}
 			}
-			payload.Findings = append(payload.Findings, Finding{
-				ReviewerID:         getStringOrEmpty(entry, "reviewer_id"),
-				Lens:               getStringOrEmpty(entry, "lens"),
-				Severity:           getStringOrEmpty(entry, "severity"),
-				Confidence:         getStringOrEmpty(entry, "confidence"),
-				Category:           getStringOrEmpty(entry, "category"),
-				FileRefs:           getStringSlice(entry["file_refs"]),
-				Summary:            getStringOrEmpty(entry, "summary"),
-				Evidence:           getStringOrEmpty(entry, "evidence"),
-				FindingFingerprint: getStringOrEmpty(entry, "finding_fingerprint"),
-				SuggestedAction:    getStringOrEmpty(entry, "suggested_action"),
-			})
+		default:
+			payload.ArtifactRefsValid = false
+		}
+	}
+	if raw, ok := v["findings"]; ok {
+		payload.HasFindings = true
+		payload.FindingsValid = true
+		switch findings := raw.(type) {
+		case nil:
+		case []any:
+			for _, item := range findings {
+				entry, ok := item.(map[string]any)
+				if !ok || !hasKeys(entry, "reviewer_id", "lens", "severity", "confidence", "category", "file_refs", "summary", "evidence", "finding_fingerprint", "suggested_action") {
+					payload.FindingsValid = false
+					break
+				}
+				finding, ok := parseFinding(entry)
+				if !ok {
+					payload.FindingsValid = false
+					break
+				}
+				payload.Findings = append(payload.Findings, finding)
+			}
+		default:
+			payload.FindingsValid = false
 		}
 	}
 	return payload, true
@@ -396,6 +544,21 @@ func getStringOrEmpty(value map[string]any, key string) string {
 	return str
 }
 
+func getNullableString(value map[string]any, key string) (string, bool) {
+	raw, ok := value[key]
+	if !ok {
+		return "", false
+	}
+	if raw == nil {
+		return "", true
+	}
+	str, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	return str, true
+}
+
 func getStringSlice(value any) []string {
 	items, ok := value.([]any)
 	if !ok {
@@ -409,6 +572,92 @@ func getStringSlice(value any) []string {
 		}
 	}
 	return result
+}
+
+func parseNullableStringSlice(value any) ([]string, bool) {
+	if value == nil {
+		return nil, true
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	var result []string
+	for _, item := range items {
+		str, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		if strings.TrimSpace(str) != "" {
+			result = append(result, str)
+		}
+	}
+	return result, true
+}
+
+func parseFinding(entry map[string]any) (Finding, bool) {
+	reviewerID, ok := getNullableString(entry, "reviewer_id")
+	if !ok {
+		return Finding{}, false
+	}
+	lens, ok := getNullableString(entry, "lens")
+	if !ok {
+		return Finding{}, false
+	}
+	severity, ok := getNullableString(entry, "severity")
+	if !ok {
+		return Finding{}, false
+	}
+	confidence, ok := getNullableString(entry, "confidence")
+	if !ok {
+		return Finding{}, false
+	}
+	category, ok := getNullableString(entry, "category")
+	if !ok {
+		return Finding{}, false
+	}
+	fileRefs, ok := parseNullableStringSlice(entry["file_refs"])
+	if !ok {
+		return Finding{}, false
+	}
+	summary, ok := getNullableString(entry, "summary")
+	if !ok {
+		return Finding{}, false
+	}
+	evidence, ok := getNullableString(entry, "evidence")
+	if !ok {
+		return Finding{}, false
+	}
+	fingerprint, ok := getNullableString(entry, "finding_fingerprint")
+	if !ok {
+		return Finding{}, false
+	}
+	suggestedAction, ok := getNullableString(entry, "suggested_action")
+	if !ok {
+		return Finding{}, false
+	}
+
+	return Finding{
+		ReviewerID:         reviewerID,
+		Lens:               lens,
+		Severity:           severity,
+		Confidence:         confidence,
+		Category:           category,
+		FileRefs:           fileRefs,
+		Summary:            summary,
+		Evidence:           evidence,
+		FindingFingerprint: fingerprint,
+		SuggestedAction:    suggestedAction,
+	}, true
+}
+
+func hasKeys(value map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := value[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func extractSessionID(raw []byte) string {
@@ -473,6 +722,53 @@ func applyDefaultArtifactRefs(result *Result, workdir, combinedLogPath string) {
 	}
 }
 
+func buildRunDir(outputRoot, taskID string, agentType AgentType, lens string, attempt int, now time.Time, runID string) string {
+	if attempt <= 0 {
+		attempt = 1
+	}
+	if strings.TrimSpace(lens) == "" {
+		lens = "default"
+	}
+	runLeaf := fmt.Sprintf("%s-%s", now.Format("20060102T150405.000000000Z"), sanitizePathSegment(runID))
+	return filepath.Join(
+		outputRoot,
+		filepath.FromSlash(taskID),
+		sanitizePathSegment(string(agentType)),
+		fmt.Sprintf("attempt-%02d", attempt),
+		sanitizePathSegment(lens),
+		runLeaf,
+	)
+}
+
+func resultFromPayload(payload resultPayload, sessionID string) Result {
+	return Result{
+		Runner:             RunnerCodexExec,
+		Status:             payload.Status,
+		Summary:            payload.Summary,
+		NextAction:         payload.NextAction,
+		FailureFingerprint: payload.FailureFingerprint,
+		SessionID:          sessionID,
+		ArtifactRefs:       payload.ArtifactRefs,
+		Findings:           payload.Findings,
+	}
+}
+
+func persistResultReport(result *Result, workdir, combinedLogPath, reportPath string) error {
+	applyDefaultArtifactRefs(result, workdir, combinedLogPath)
+	if result.ArtifactRefs.Report == "" {
+		result.ArtifactRefs.Report = relOrAbs(workdir, reportPath)
+	}
+
+	reportBytes, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return wrapToolError(ErrorCodeInternalFailure, false, "marshal result: %v", err)
+	}
+	if err := os.WriteFile(reportPath, reportBytes, 0o644); err != nil {
+		return wrapToolError(ErrorCodeArtifactWriteFailed, false, "write result report: %v", err)
+	}
+	return nil
+}
+
 func relOrAbs(workdir, path string) string {
 	rel, err := filepath.Rel(workdir, path)
 	if err == nil {
@@ -488,6 +784,96 @@ func resolveAgainstWorkDir(workdir, path string) string {
 	return filepath.Join(workdir, path)
 }
 
+func upsertEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func buildRunnerOutputDir(workdir, outputRoot, runDir string, agentType AgentType) (string, error) {
+	if agentType != AgentReviewer || !isWithinWorkdir(workdir, runDir) {
+		return runDir, nil
+	}
+
+	relRunPath, err := filepath.Rel(outputRoot, runDir)
+	if err != nil {
+		return "", err
+	}
+	runnerOutputDir := filepath.Join(os.TempDir(), "toolhub-codex", relRunPath)
+	if err := os.MkdirAll(runnerOutputDir, 0o755); err != nil {
+		return "", err
+	}
+	return runnerOutputDir, nil
+}
+
+func additionalWritableDirs(workdir string, paths ...string) []string {
+	seen := make(map[string]struct{})
+	var dirs []string
+	for _, path := range paths {
+		dir := filepath.Clean(filepath.Dir(path))
+		if dir == "." || dir == "" {
+			continue
+		}
+		if isWithinWorkdir(workdir, dir) {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	return dirs
+}
+
+func isWithinWorkdir(workdir, path string) bool {
+	rel, err := filepath.Rel(workdir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
+}
+
+func sanitizePathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
+}
+
+func defaultRunID() string {
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err == nil {
+		return hex.EncodeToString(buf[:])
+	}
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
 func writeCombinedLog(path string, stdout, stderr []byte) error {
 	var b strings.Builder
 	b.WriteString("== stdout ==\n")
@@ -501,6 +887,32 @@ func writeCombinedLog(path string, stdout, stderr []byte) error {
 		b.WriteByte('\n')
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Duration) func() {
+	if out == nil || interval <= 0 {
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintf(out, "[progress] still running (%s)\n", interval)
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+	}
 }
 
 func mustSchema(path string) []byte {

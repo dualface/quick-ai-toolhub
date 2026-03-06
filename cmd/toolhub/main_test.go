@@ -19,7 +19,7 @@ func (f fakeRunTaskExecutor) RunTask(ctx context.Context, opts agentrun.RunOptio
 	return f.run(ctx, opts)
 }
 
-func TestRunTaskOutputsSuccessEnvelope(t *testing.T) {
+func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 	orig := newRunTaskExecutor
 	t.Cleanup(func() { newRunTaskExecutor = orig })
 	newRunTaskExecutor = func() runTaskExecutor {
@@ -27,6 +27,9 @@ func TestRunTaskOutputsSuccessEnvelope(t *testing.T) {
 			run: func(_ context.Context, opts agentrun.RunOptions) (agentrun.Result, error) {
 				if opts.Lens != "delivery" {
 					t.Fatalf("unexpected lens: %s", opts.Lens)
+				}
+				if opts.ProgressOutput == nil {
+					t.Fatal("expected progress output writer")
 				}
 				if opts.ContextRefs.GitHubPRNumber != 42 {
 					t.Fatalf("unexpected pr number: %d", opts.ContextRefs.GitHubPRNumber)
@@ -39,6 +42,10 @@ func TestRunTaskOutputsSuccessEnvelope(t *testing.T) {
 					Status:     "success",
 					Summary:    "done",
 					NextAction: "proceed",
+					ArtifactRefs: agentrun.ArtifactRefs{
+						Log:    ".toolhub/runs/log",
+						Report: ".toolhub/runs/result.json",
+					},
 				}, nil
 			},
 		}
@@ -54,6 +61,53 @@ func TestRunTaskOutputsSuccessEnvelope(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
+	output := stdout.String()
+	for _, needle := range []string{
+		"Task: Sprint-04/Task-01",
+		"Runner: codex_exec",
+		"Status: success",
+		"Next: proceed",
+		"Summary:",
+		"done",
+		"Artifacts:",
+		"- log: .toolhub/runs/log",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("missing %q in output:\n%s", needle, output)
+		}
+	}
+}
+
+func TestRunTaskStreamDisablesProgress(t *testing.T) {
+	orig := newRunTaskExecutor
+	t.Cleanup(func() { newRunTaskExecutor = orig })
+	newRunTaskExecutor = func() runTaskExecutor {
+		return fakeRunTaskExecutor{
+			run: func(_ context.Context, opts agentrun.RunOptions) (agentrun.Result, error) {
+				if opts.StreamOutput == nil {
+					t.Fatal("expected stream output writer")
+				}
+				if opts.ProgressOutput != nil {
+					t.Fatal("expected progress output to be disabled when stream is enabled")
+				}
+				return agentrun.Result{
+					Runner:     agentrun.RunnerCodexExec,
+					Status:     "success",
+					Summary:    "done",
+					NextAction: "proceed",
+				}, nil
+			},
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := run(context.Background(), []string{
+		"run-task", "Sprint-04/Task-01",
+		"--stream",
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
 	var response commandResponse
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
@@ -63,7 +117,7 @@ func TestRunTaskOutputsSuccessEnvelope(t *testing.T) {
 	}
 }
 
-func TestRunTaskOutputsErrorEnvelope(t *testing.T) {
+func TestRunTaskOutputsHumanReadableError(t *testing.T) {
 	orig := newRunTaskExecutor
 	t.Cleanup(func() { newRunTaskExecutor = orig })
 	newRunTaskExecutor = func() runTaskExecutor {
@@ -85,12 +139,15 @@ func TestRunTaskOutputsErrorEnvelope(t *testing.T) {
 		t.Fatalf("unexpected error type: %v", err)
 	}
 
-	var response commandResponse
-	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if response.OK || response.Error == nil || response.Error.Code != agentrun.ErrorCodeMalformedOutput {
-		t.Fatalf("unexpected response: %s", stdout.String())
+	output := stdout.String()
+	for _, needle := range []string{
+		"Error: malformed_output",
+		"Message: malformed_output: missing summary",
+		"Retryable: true",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("missing %q in output:\n%s", needle, output)
+		}
 	}
 }
 
@@ -100,9 +157,33 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"--lens", "--github-pr-number", "--context-log"} {
+	for _, needle := range []string{"--lens", "--github-pr-number", "--context-log", "--config-file", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
+		}
+	}
+}
+
+func TestRunTaskInvalidFlagIsClassifiedAsInvalidRequest(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{"run-task", "--timeout", "not-a-duration", "Sprint-04/Task-01"}, &stdout, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected cli exit error")
+	}
+
+	var exitErr *cliExitError
+	if !errors.As(err, &exitErr) || exitErr.code != 2 {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+
+	output := stdout.String()
+	for _, needle := range []string{
+		"Error: invalid_request",
+		"Message:",
+		"Retryable: false",
+	} {
+		if !strings.Contains(output, needle) {
+			t.Fatalf("missing %q in output:\n%s", needle, output)
 		}
 	}
 }

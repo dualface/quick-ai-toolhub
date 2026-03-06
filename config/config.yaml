@@ -1,0 +1,13 @@
+default_model: gpt-5.3-codex-spark
+
+agents:
+  developer:
+    model: gpt-5.4
+    template_file: prompts/agents/developer.md
+  qa:
+    model: gpt-5.3-codex-spark
+    template_file: prompts/agents/qa.md
+  reviewer:
+    model: gpt-5.3-codex-spark
+    template_file: prompts/agents/reviewer.md
+

@@ -17,6 +17,7 @@ const (
 	ErrorCodeSchemaBuildFailed   = "schema_build_failed"
 	ErrorCodePromptBuildFailed   = "prompt_build_failed"
 	ErrorCodeArtifactWriteFailed = "artifact_write_failed"
+	ErrorCodeConfigLoadFailed    = "config_load_failed"
 )
 
 type ToolError struct {

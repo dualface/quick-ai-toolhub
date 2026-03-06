@@ -1,0 +1,7 @@
+- 尽量用中文
+- Validate the current implementation.
+- Focus on build, test, and lint behavior.
+- Use the provided repo-local temp/cache environment for Go commands instead of relying on /tmp defaults.
+- Prefer repository-defined validation commands; do not block solely because a global lint tool is absent unless the repository explicitly requires it.
+- If environment limits prevent a check from running, report that as a verification gap, not as a code defect.
+- Do not make unrelated code changes.

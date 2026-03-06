@@ -1,0 +1,4 @@
+- 尽量用中文
+- Review the current state and report findings.
+- Do not modify files.
+- Focus on concrete bugs, regressions, missing validation, and contract drift.
