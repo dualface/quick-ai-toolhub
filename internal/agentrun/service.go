@@ -446,7 +446,7 @@ func commandEnvKeys(opts RunOptions) []string {
 		return nil
 	}
 
-	keys := []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"}
+	keys := []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE", "GOMODCACHE", "XDG_CACHE_HOME"}
 	if opts.IsolatedCodexHome {
 		keys = append(keys, "HOME")
 	}
@@ -463,10 +463,15 @@ func buildCommandEnv(workdir string, agentType AgentType, isolatedCodexHome bool
 	tmpDir := filepath.Join(baseDir, "tmp")
 	goBuildDir := filepath.Join(baseDir, "go-build")
 	goCacheDir := filepath.Join(baseDir, "go-cache")
-	for _, dir := range []string{tmpDir, goBuildDir, goCacheDir} {
+	xdgCacheHome := filepath.Join(baseDir, ".cache")
+	for _, dir := range []string{tmpDir, goBuildDir, goCacheDir, xdgCacheHome} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
+	}
+	goModCacheDir, err := resolveGoModCacheDir(workdir, baseDir)
+	if err != nil {
+		return nil, err
 	}
 
 	env = upsertEnv(env, "TMPDIR", tmpDir)
@@ -474,6 +479,8 @@ func buildCommandEnv(workdir string, agentType AgentType, isolatedCodexHome bool
 	env = upsertEnv(env, "TEMP", tmpDir)
 	env = upsertEnv(env, "GOTMPDIR", goBuildDir)
 	env = upsertEnv(env, "GOCACHE", goCacheDir)
+	env = upsertEnv(env, "GOMODCACHE", goModCacheDir)
+	env = upsertEnv(env, "XDG_CACHE_HOME", xdgCacheHome)
 	if isolatedCodexHome {
 		homeDir := filepath.Join(baseDir, "home")
 		if err := os.MkdirAll(homeDir, 0o755); err != nil {
@@ -482,6 +489,48 @@ func buildCommandEnv(workdir string, agentType AgentType, isolatedCodexHome bool
 		env = upsertEnv(env, "HOME", homeDir)
 	}
 	return env, nil
+}
+
+func resolveGoModCacheDir(workdir string, runtimeDir string) (string, error) {
+	primary := filepath.Join(runtimeDir, "go-mod-cache")
+	if err := os.MkdirAll(primary, 0o755); err != nil {
+		return "", err
+	}
+
+	hasEntries, err := dirHasEntries(primary)
+	if err != nil {
+		return "", err
+	}
+	if hasEntries {
+		return primary, nil
+	}
+
+	legacyCandidates := []string{
+		filepath.Join(runtimeDir, "tmp", "gomodcache"),
+		filepath.Join(workdir, ".toolhub", ".modcache"),
+	}
+	for _, candidate := range legacyCandidates {
+		hasEntries, err := dirHasEntries(candidate)
+		if err != nil {
+			return "", err
+		}
+		if hasEntries {
+			return candidate, nil
+		}
+	}
+
+	return primary, nil
+}
+
+func dirHasEntries(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(entries) > 0, nil
 }
 
 func runnerFailureSummary(stderr []byte) string {

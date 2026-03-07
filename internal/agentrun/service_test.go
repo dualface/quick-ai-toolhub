@@ -41,7 +41,7 @@ func TestRunTaskCodexExec(t *testing.T) {
 			if lastMessagePath == "" {
 				t.Fatal("missing last message path")
 			}
-			for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE"} {
+			for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE", "GOMODCACHE", "XDG_CACHE_HOME"} {
 				if !envContainsKey(req.Env, key) {
 					t.Fatalf("missing %s in command env", key)
 				}
@@ -542,11 +542,13 @@ func TestBuildCommandEnvDeveloperSetsRepoLocalRuntimeDirs(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"TMPDIR":   filepath.Join(repo, ".toolhub", "runtime", "tmp"),
-		"TMP":      filepath.Join(repo, ".toolhub", "runtime", "tmp"),
-		"TEMP":     filepath.Join(repo, ".toolhub", "runtime", "tmp"),
-		"GOTMPDIR": filepath.Join(repo, ".toolhub", "runtime", "go-build"),
-		"GOCACHE":  filepath.Join(repo, ".toolhub", "runtime", "go-cache"),
+		"TMPDIR":         filepath.Join(repo, ".toolhub", "runtime", "tmp"),
+		"TMP":            filepath.Join(repo, ".toolhub", "runtime", "tmp"),
+		"TEMP":           filepath.Join(repo, ".toolhub", "runtime", "tmp"),
+		"GOTMPDIR":       filepath.Join(repo, ".toolhub", "runtime", "go-build"),
+		"GOCACHE":        filepath.Join(repo, ".toolhub", "runtime", "go-cache"),
+		"GOMODCACHE":     filepath.Join(repo, ".toolhub", "runtime", "go-mod-cache"),
+		"XDG_CACHE_HOME": filepath.Join(repo, ".toolhub", "runtime", ".cache"),
 	}
 	for key, expected := range want {
 		if got := envValue(env, key); got != expected {
@@ -555,6 +557,27 @@ func TestBuildCommandEnvDeveloperSetsRepoLocalRuntimeDirs(t *testing.T) {
 	}
 	if got := envValue(env, "HOME"); got == filepath.Join(repo, ".toolhub", "runtime", "home") {
 		t.Fatalf("did not expect HOME override by default, got %q", got)
+	}
+}
+
+func TestBuildCommandEnvReusesPopulatedLegacyGoModCache(t *testing.T) {
+	repo := t.TempDir()
+	legacyCacheDir := filepath.Join(repo, ".toolhub", "runtime", "tmp", "gomodcache", "cache")
+	if err := os.MkdirAll(legacyCacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir legacy cache: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyCacheDir, "module.info"), []byte("warm"), 0o644); err != nil {
+		t.Fatalf("seed legacy cache: %v", err)
+	}
+
+	env, err := buildCommandEnv(repo, AgentDeveloper, false)
+	if err != nil {
+		t.Fatalf("build command env: %v", err)
+	}
+
+	want := filepath.Join(repo, ".toolhub", "runtime", "tmp", "gomodcache")
+	if got := envValue(env, "GOMODCACHE"); got != want {
+		t.Fatalf("unexpected GOMODCACHE fallback: got %q want %q", got, want)
 	}
 }
 
@@ -577,12 +600,12 @@ func TestBuildCommandEnvIsolatedCodexHomeOverridesHome(t *testing.T) {
 
 func TestCommandEnvKeysIncludeHomeOnlyForIsolatedDeveloperRuns(t *testing.T) {
 	keys := commandEnvKeys(RunOptions{AgentType: AgentDeveloper})
-	if strings.Join(keys, ",") != "TMPDIR,TMP,TEMP,GOTMPDIR,GOCACHE" {
+	if strings.Join(keys, ",") != "TMPDIR,TMP,TEMP,GOTMPDIR,GOCACHE,GOMODCACHE,XDG_CACHE_HOME" {
 		t.Fatalf("unexpected default env keys: %v", keys)
 	}
 
 	keys = commandEnvKeys(RunOptions{AgentType: AgentDeveloper, IsolatedCodexHome: true})
-	if strings.Join(keys, ",") != "TMPDIR,TMP,TEMP,GOTMPDIR,GOCACHE,HOME" {
+	if strings.Join(keys, ",") != "TMPDIR,TMP,TEMP,GOTMPDIR,GOCACHE,GOMODCACHE,XDG_CACHE_HOME,HOME" {
 		t.Fatalf("unexpected isolated env keys: %v", keys)
 	}
 

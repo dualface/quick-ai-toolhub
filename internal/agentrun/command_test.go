@@ -42,10 +42,12 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 		Metadata: CommandMetadata{
 			Model:   "gpt-5-codex",
 			Sandbox: "workspace-write",
-			EnvKeys: []string{"TMPDIR", "GOCACHE"},
+			EnvKeys: []string{"TMPDIR", "GOCACHE", "GOMODCACHE", "XDG_CACHE_HOME"},
 			EnvSnapshot: map[string]string{
-				"TMPDIR":  "/repo/.toolhub/runtime/tmp",
-				"GOCACHE": "/repo/.toolhub/runtime/go-cache",
+				"TMPDIR":         "/repo/.toolhub/runtime/tmp",
+				"GOCACHE":        "/repo/.toolhub/runtime/go-cache",
+				"GOMODCACHE":     "/repo/.toolhub/runtime/go-mod-cache",
+				"XDG_CACHE_HOME": "/repo/.toolhub/runtime/.cache",
 			},
 		},
 	})
@@ -63,6 +65,8 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 		"[progress] sandbox: workspace-write",
 		"[progress] env TMPDIR: /repo/.toolhub/runtime/tmp",
 		"[progress] env GOCACHE: /repo/.toolhub/runtime/go-cache",
+		"[progress] env GOMODCACHE: /repo/.toolhub/runtime/go-mod-cache",
+		"[progress] env XDG_CACHE_HOME: /repo/.toolhub/runtime/.cache",
 		"[progress] agent started",
 		"[progress] todo 1/2, current: second",
 		"[progress] agent finished",

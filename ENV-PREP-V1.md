@@ -63,6 +63,10 @@ codex login status
 - `.toolhub/runtime/tmp`
 - `.toolhub/runtime/go-build`
 - `.toolhub/runtime/go-cache`
+- `.toolhub/runtime/go-mod-cache`
+- `.toolhub/runtime/.cache`
+
+如果仓库里已经存在预热过的历史 module cache（例如 `.toolhub/runtime/tmp/gomodcache`），`toolhub` 会自动复用它，避免在无网络环境里重新下载依赖。
 
 如果手工执行 `go build` / `go vet`，建议也显式使用这些目录：
 
@@ -72,6 +76,8 @@ export TMP="$TMPDIR"
 export TEMP="$TMPDIR"
 export GOTMPDIR="$PWD/.toolhub/runtime/go-build"
 export GOCACHE="$PWD/.toolhub/runtime/go-cache"
+export GOMODCACHE="$PWD/.toolhub/runtime/go-mod-cache"
+export XDG_CACHE_HOME="$PWD/.toolhub/runtime/.cache"
 ```
 
 ### 3. Reviewer 只读约束
@@ -84,7 +90,7 @@ export GOCACHE="$PWD/.toolhub/runtime/go-cache"
 ### 3.1 Codex 运行时目录约束
 
 - 默认保留用户现有 `HOME` / `~/.codex`，避免破坏 `codex login status`
-- `toolhub` 会显式设置 repo 内的 `TMPDIR`、`GOTMPDIR`、`GOCACHE`
+- `toolhub` 会显式设置 repo 内的 `TMPDIR`、`GOTMPDIR`、`GOCACHE`、`GOMODCACHE`、`XDG_CACHE_HOME`
 - 如果宿主环境会让 `codex` 访问 `~/.codex/tmp/arg0` 时触发权限错误，可在 `developer` / `qa` 运行里改用 `toolhub run-task --isolated-codex-home`
 - `--isolated-codex-home` 只作为后备隔离模式；默认不要打开，除非确认 Codex 自身运行时目录会阻塞执行
 
