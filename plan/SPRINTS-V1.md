@@ -107,8 +107,10 @@
 | --------- | ----------------------------- | ------------------------------------------------ |
 | `Task-01` | 实现 run-agent-tool           | 建立 Agent 调用接口、超时控制和结果收集          |
 | `Task-02` | 实现 Task Orchestrator 阶段机 | 打通 `developer`、`qa`、`review` 阶段推进和回退  |
-| `Task-03` | 实现 review-aggregation-tool  | 聚合 findings、去重、升级冲突并输出结构化结论    |
-| `Task-04` | 实现失败预算与无进展检测      | 生成 failure fingerprint，统计尝试次数并触发升级 |
+| `Task-03` | 实现 review-aggregation-tool  | 实现 findings 聚合内核、去重、置信度提升和冲突识别 |
+| `Task-04` | 接入 review 聚合与补充审查流  | 将 review-aggregation-tool 接入 orchestrator 并完成补充审查分支 |
+| `Task-05` | 实现失败指纹与重试计数        | 生成 failure fingerprint 并维护各阶段失败计数 |
+| `Task-06` | 实现无进展检测与升级建议      | 检测重复失败和长时间无进展并输出升级信号 |
 
 ## [Sprint-05] Task PR 与 CI
 
