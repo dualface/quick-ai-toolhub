@@ -190,6 +190,7 @@ func resultSchemaJSON() ([]byte, error) {
 		"properties": map[string]any{
 			"status": map[string]any{
 				"type": "string",
+				"enum": allowedResultStatuses(),
 			},
 			"summary": map[string]any{
 				"type": "string",

@@ -157,7 +157,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 
 	if runErr != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			result.Status = "failed"
+			result.Status = "timeout"
 			result.Summary = "codex_exec timed out before producing a structured result"
 			result.NextAction = "retry"
 			result.FailureFingerprint = ErrorCodeRunnerTimeout
@@ -167,22 +167,18 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 			return result, nil
 		}
 
-		if payload, sessionID, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout); err == nil {
-			if err := validatePayload(payload); err == nil {
-				result = resultFromPayload(payload, sessionID)
-				if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
-					return Result{}, err
+		if payload, _, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout); err == nil {
+			if err := validatePayload(payload); err != nil {
+				if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
+					result.Status = "failed"
+					result.Summary = "codex_exec did not return a valid structured result"
+					result.NextAction = "retry"
+					result.FailureFingerprint = ErrorCodeMalformedOutput
+					if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+						return Result{}, err
+					}
+					return result, nil
 				}
-				return result, nil
-			} else if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
-				result.Status = "failed"
-				result.Summary = "codex_exec did not return a valid structured result"
-				result.NextAction = "retry"
-				result.FailureFingerprint = ErrorCodeMalformedOutput
-				if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
-					return Result{}, err
-				}
-				return result, nil
 			}
 		} else if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
 			result.Status = "failed"
@@ -558,8 +554,12 @@ func parseRunnerOutput(lastMessagePath string, stdout []byte) (resultPayload, st
 }
 
 func validatePayload(payload resultPayload) error {
-	if strings.TrimSpace(payload.Status) == "" {
+	status := strings.TrimSpace(payload.Status)
+	if status == "" {
 		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing status", true)
+	}
+	if !isAllowedResultStatus(status) {
+		return newToolError(ErrorCodeMalformedOutput, fmt.Sprintf("malformed_output: invalid status %q", payload.Status), true)
 	}
 	if strings.TrimSpace(payload.Summary) == "" {
 		return newToolError(ErrorCodeMalformedOutput, "malformed_output: missing summary", true)

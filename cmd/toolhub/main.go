@@ -28,11 +28,19 @@ type runTaskExecutor interface {
 	RunTask(ctx context.Context, opts agentrun.RunOptions) (agentrun.Result, error)
 }
 
+type runAgentExecutor interface {
+	Execute(ctx context.Context, req agentrun.Request, opts agentrun.ExecuteOptions) agentrun.Response
+}
+
 type prepareWorktreeExecutor interface {
 	Execute(context.Context, worktreeprep.Request, worktreeprep.ExecuteOptions) worktreeprep.Response
 }
 
 var newRunTaskExecutor = func() runTaskExecutor {
+	return agentrun.NewExecutor(agentrun.ExecCommandRunner{})
+}
+
+var newRunAgentExecutor = func() runAgentExecutor {
 	return agentrun.NewExecutor(agentrun.ExecCommandRunner{})
 }
 
@@ -42,12 +50,6 @@ var newPrepareWorktreeExecutor = func() prepareWorktreeExecutor {
 
 var runServeApplication = func(ctx context.Context, application *app.Application) error {
 	return application.Serve(ctx)
-}
-
-type commandResponse struct {
-	OK    bool                `json:"ok"`
-	Data  *agentrun.Result    `json:"data,omitempty"`
-	Error *agentrun.ToolError `json:"error,omitempty"`
 }
 
 type cliExitError struct {
@@ -87,6 +89,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runGetTaskList(ctx, args[1:], stdout)
 	case "prepare-worktree", "prepare-worktree-tool":
 		return runPrepareWorktree(ctx, args[1:], stdout)
+	case "run-agent-tool":
+		return runRunAgentTool(ctx, args[1:], stdout, stderr)
 	case "run-task":
 		return runRunTask(ctx, args[1:], stdout, stderr)
 	default:
@@ -103,6 +107,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  toolhub github-sync-tool <op> [flags]")
 	fmt.Fprintln(w, "  toolhub get-task-list-tool [flags]")
 	fmt.Fprintln(w, "  toolhub prepare-worktree-tool [flags]")
+	fmt.Fprintln(w, "  toolhub run-agent-tool [flags]")
 	fmt.Fprintln(w, "  toolhub run-task <task-id> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
@@ -110,6 +115,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  github-sync-tool      Reconcile GitHub issues / PRs / CI into SQLite projections.")
 	fmt.Fprintln(w, "  get-task-list-tool    Read projected Sprint/Task state and report scheduling blockers.")
 	fmt.Fprintln(w, "  prepare-worktree-tool Create or reuse the Sprint/task branches and task worktree.")
+	fmt.Fprintln(w, "  run-agent-tool        Run an agent and emit the standard tool JSON envelope.")
+	fmt.Fprintln(w, "  run-task              Run the same agent flow with human-readable output by default.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "sync-issues Flags:")
 	fmt.Fprintln(w, "  --apply                 Perform GitHub writes. Default is dry-run.")
@@ -141,7 +148,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --config-file           Path to the repository config file. Defaults to CONFIG_FILE or config/config.yaml.")
 	fmt.Fprintln(w, "  --workdir               Repository worktree for config discovery and git operations.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "run-task Flags:")
+	fmt.Fprintln(w, "run-agent-tool / run-task Flags:")
+	fmt.Fprintln(w, "  --task-id               Optional task id flag; run-task also accepts a positional task id.")
 	fmt.Fprintln(w, "  --agent-type            developer | qa | reviewer")
 	fmt.Fprintln(w, "  --attempt               Attempt number. Default 1.")
 	fmt.Fprintln(w, "  --lens                  Optional execution lens.")
@@ -155,6 +163,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --workdir               Repository worktree for agent execution.")
 	fmt.Fprintln(w, "  --output-root           Root directory for run artifacts.")
 	fmt.Fprintln(w, "  --timeout               Timeout duration, e.g. 30m.")
+	fmt.Fprintln(w, "  --timeout-seconds       Timeout in whole seconds; matches the tool request schema.")
 	fmt.Fprintln(w, "  --model                 Optional runner model override.")
 	fmt.Fprintln(w, "  --yolo                  Bypass approvals and sandbox for codex.")
 	fmt.Fprintln(w, "  --isolated-codex-home   Developer/qa only: redirect codex HOME into .toolhub/runtime/home.")
@@ -588,19 +597,30 @@ func readGitHubSyncRequest(r io.Reader) (githubsync.Request, error) {
 }
 
 func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return runAgentCommand(ctx, "run-task", args, stdout, stderr, false)
+}
+
+func runRunAgentTool(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	return runAgentCommand(ctx, "run-agent-tool", args, stdout, stderr, true)
+}
+
+func runAgentCommand(ctx context.Context, commandName string, args []string, stdout, stderr io.Writer, structuredOutput bool) error {
 	var taskID string
 	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
 		taskID = args[0]
 		args = args[1:]
 	}
 
-	fs := flag.NewFlagSet("run-task", flag.ContinueOnError)
+	fs := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	var opts agentrun.RunOptions
 	var timeout time.Duration
+	var timeoutSeconds int
 	var stream bool
 	var noProgress bool
+	var taskIDFlag string
+	fs.StringVar(&taskIDFlag, "task-id", "", "task id")
 	fs.StringVar((*string)(&opts.AgentType), "agent-type", string(agentrun.AgentDeveloper), "agent type")
 	fs.IntVar(&opts.Attempt, "attempt", 1, "attempt number")
 	fs.StringVar(&opts.Lens, "lens", "", "optional execution lens")
@@ -613,7 +633,8 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fs.StringVar(&opts.TasksDir, "tasks-dir", "plan/tasks", "path to task brief directory")
 	fs.StringVar(&opts.WorkDir, "workdir", ".", "repository worktree for agent execution")
 	fs.StringVar(&opts.OutputRoot, "output-root", ".toolhub/runs", "root directory for run artifacts")
-	fs.DurationVar(&timeout, "timeout", 30*time.Minute, "runner timeout")
+	fs.DurationVar(&timeout, "timeout", 0, "runner timeout")
+	fs.IntVar(&timeoutSeconds, "timeout-seconds", 0, "runner timeout in seconds")
 	fs.StringVar(&opts.Model, "model", "", "optional model override")
 	fs.BoolVar(&opts.Yolo, "yolo", false, "bypass approvals and sandbox for codex")
 	fs.BoolVar(&opts.IsolatedCodexHome, "isolated-codex-home", false, "developer/qa only: redirect codex HOME into .toolhub/runtime/home")
@@ -629,27 +650,40 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			Code:      agentrun.ErrorCodeInvalidRequest,
 			Message:   err.Error(),
 			Retryable: false,
-		}, 2, stream)
+		}, 2, structuredOutput || stream)
 	}
 
-	if taskID == "" {
-		if fs.NArg() != 1 {
-			return writeErrorResponse(stdout, &agentrun.ToolError{
-				Code:      agentrun.ErrorCodeInvalidRequest,
-				Message:   "run-task requires exactly one task id argument",
-				Retryable: false,
-			}, 2, stream)
-		}
-		taskID = fs.Arg(0)
-	} else if fs.NArg() != 0 {
+	taskIDFlag = strings.TrimSpace(taskIDFlag)
+	switch {
+	case taskID == "":
+		taskID = taskIDFlag
+	case taskIDFlag != "" && taskIDFlag != taskID:
 		return writeErrorResponse(stdout, &agentrun.ToolError{
 			Code:      agentrun.ErrorCodeInvalidRequest,
-			Message:   "run-task accepts flags only after the task id",
+			Message:   "task id does not match positional task id",
 			Retryable: false,
-		}, 2, stream)
+		}, 2, structuredOutput || stream)
+	}
+	if taskID == "" {
+		return writeErrorResponse(stdout, &agentrun.ToolError{
+			Code:      agentrun.ErrorCodeInvalidRequest,
+			Message:   commandName + " requires a task id",
+			Retryable: false,
+		}, 2, structuredOutput || stream)
+	}
+	if fs.NArg() != 0 {
+		return writeErrorResponse(stdout, &agentrun.ToolError{
+			Code:      agentrun.ErrorCodeInvalidRequest,
+			Message:   commandName + " accepts flags only after the task id",
+			Retryable: false,
+		}, 2, structuredOutput || stream)
 	}
 	opts.TaskID = taskID
-	opts.Timeout = timeout
+	if timeoutSeconds > 0 {
+		opts.Timeout = time.Duration(timeoutSeconds) * time.Second
+	} else {
+		opts.Timeout = timeout
+	}
 	if stream {
 		opts.StreamOutput = stderr
 	} else if !noProgress {
@@ -658,21 +692,42 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 
 	absWorkDir, err := filepath.Abs(opts.WorkDir)
 	if err != nil {
-		return writeErrorResponse(stdout, agentrun.AsToolError(fmt.Errorf("resolve workdir: %w", err)), 1, stream)
+		return writeErrorResponse(stdout, agentrun.AsToolError(fmt.Errorf("resolve workdir: %w", err)), 1, structuredOutput || stream)
 	}
 	opts.WorkDir = absWorkDir
 	opts.ContextRefs.WorktreePath = absWorkDir
 
+	if structuredOutput {
+		response := newRunAgentExecutor().Execute(ctx, agentrun.Request{
+			AgentType:      opts.AgentType,
+			TaskID:         opts.TaskID,
+			Attempt:        opts.Attempt,
+			Lens:           opts.Lens,
+			Model:          opts.Model,
+			ConfigFile:     opts.ConfigFile,
+			TimeoutSeconds: timeoutSeconds,
+			ContextRefs:    opts.ContextRefs,
+		}, agentrun.ExecuteOptions{
+			PlanFile:          opts.PlanFile,
+			TasksDir:          opts.TasksDir,
+			WorkDir:           opts.WorkDir,
+			OutputRoot:        opts.OutputRoot,
+			Timeout:           opts.Timeout,
+			Yolo:              opts.Yolo,
+			IsolatedCodexHome: opts.IsolatedCodexHome,
+			StreamOutput:      opts.StreamOutput,
+			ProgressOutput:    opts.ProgressOutput,
+		})
+		return writeAgentRunResponse(stdout, response)
+	}
+
 	executor := newRunTaskExecutor()
 	result, err := executor.RunTask(ctx, opts)
 	if err != nil {
-		return writeErrorResponse(stdout, agentrun.AsToolError(err), 1, stream)
+		return writeErrorResponse(stdout, agentrun.AsToolError(err), 1, structuredOutput || stream)
 	}
-
 	if stream {
-		encoder := json.NewEncoder(stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(commandResponse{
+		return writeAgentRunResponse(stdout, agentrun.Response{
 			OK:   true,
 			Data: &result,
 		})
@@ -732,6 +787,23 @@ func writePrepareWorktreeResponse(stdout io.Writer, response worktreeprep.Respon
 	return &cliExitError{code: exitCode}
 }
 
+func writeAgentRunResponse(stdout io.Writer, response agentrun.Response) error {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(response); err != nil {
+		return err
+	}
+	if response.OK {
+		return nil
+	}
+
+	exitCode := 1
+	if response.Error != nil && response.Error.Code == agentrun.ErrorCodeInvalidRequest {
+		exitCode = 2
+	}
+	return &cliExitError{code: exitCode}
+}
+
 func writeErrorResponse(stdout io.Writer, toolErr *agentrun.ToolError, exitCode int, jsonOutput bool) error {
 	if !jsonOutput {
 		if err := writeHumanError(stdout, toolErr); err != nil {
@@ -740,15 +812,11 @@ func writeErrorResponse(stdout io.Writer, toolErr *agentrun.ToolError, exitCode 
 		return &cliExitError{code: exitCode}
 	}
 
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(commandResponse{
+	response := agentrun.Response{
 		OK:    false,
 		Error: toolErr,
-	}); err != nil {
-		return err
 	}
-	return &cliExitError{code: exitCode}
+	return writeAgentRunResponse(stdout, response)
 }
 
 func writeHumanResult(w io.Writer, taskID string, result agentrun.Result) error {

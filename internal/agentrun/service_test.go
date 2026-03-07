@@ -347,6 +347,53 @@ func TestRunTaskRunnerFailureReturnsStructuredResult(t *testing.T) {
 	}
 }
 
+func TestRunTaskRunnerFailureWithValidPayloadReturnsRunnerFailure(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"success","summary":"ok","next_action":"done","failure_fingerprint":null,"artifact_refs":null,"findings":null}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{
+				Stdout: []byte(`{"session_id":"123e4567-e89b-12d3-a456-426614174000"}` + "\n"),
+				Stderr: []byte("runner failed\n"),
+			}, errors.New("exit status 1")
+		},
+	}
+
+	executor := NewExecutor(runner)
+	executor.now = func() time.Time {
+		return time.Date(2026, 3, 6, 12, 1, 15, 0, time.UTC)
+	}
+	executor.runID = func() string { return "runid123" }
+
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	if result.NextAction != "retry" {
+		t.Fatalf("unexpected next action: %s", result.NextAction)
+	}
+	if result.FailureFingerprint != ErrorCodeRunnerExecution {
+		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
+	}
+	if result.Summary != "codex_exec failed before producing a structured result" {
+		t.Fatalf("unexpected summary: %s", result.Summary)
+	}
+}
+
 func TestRunTaskRunnerFailureWithMalformedPayloadReturnsMalformedOutput(t *testing.T) {
 	repo := setupTestRepo(t)
 	runner := &fakeCommandRunner{
@@ -383,6 +430,44 @@ func TestRunTaskRunnerFailureWithMalformedPayloadReturnsMalformedOutput(t *testi
 	}
 }
 
+func TestRunTaskRejectsUnknownStatusPayload(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"green","summary":"implemented","next_action":"proceed","failure_fingerprint":null,"artifact_refs":null,"findings":null}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	executor.now = func() time.Time {
+		return time.Date(2026, 3, 6, 12, 1, 45, 0, time.UTC)
+	}
+	executor.runID = func() string { return "runid123" }
+
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	if result.FailureFingerprint != ErrorCodeMalformedOutput {
+		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
+	}
+}
+
 func TestRunTaskTimeoutReturnsStructuredResult(t *testing.T) {
 	repo := setupTestRepo(t)
 	runner := &fakeCommandRunner{
@@ -410,7 +495,7 @@ func TestRunTaskTimeoutReturnsStructuredResult(t *testing.T) {
 		t.Fatalf("run task: %v", err)
 	}
 
-	if result.Status != "failed" {
+	if result.Status != "timeout" {
 		t.Fatalf("unexpected status: %s", result.Status)
 	}
 	if result.FailureFingerprint != ErrorCodeRunnerTimeout {
@@ -753,6 +838,148 @@ func TestResultJSONIncludesRequiredContractKeys(t *testing.T) {
 	}
 }
 
+func TestResultJSONUsesNullForUnsetOptionalFields(t *testing.T) {
+	result := Result{
+		Runner:     RunnerCodexExec,
+		Status:     "success",
+		Summary:    "ok",
+		NextAction: "proceed",
+		Findings: []Finding{
+			{},
+		},
+	}
+
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if value["failure_fingerprint"] != nil {
+		t.Fatalf("expected null failure_fingerprint, got %v", value["failure_fingerprint"])
+	}
+
+	artifactRefs, ok := value["artifact_refs"].(map[string]any)
+	if !ok {
+		t.Fatalf("artifact_refs is not an object: %T", value["artifact_refs"])
+	}
+	for _, key := range []string{"log", "worktree", "patch", "report"} {
+		if artifactRefs[key] != nil {
+			t.Fatalf("expected artifact_refs.%s to be null, got %v", key, artifactRefs[key])
+		}
+	}
+
+	findings, ok := value["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("unexpected findings payload: %v", value["findings"])
+	}
+	finding, ok := findings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected finding payload: %T", findings[0])
+	}
+	for _, key := range []string{"reviewer_id", "lens", "severity", "confidence", "category", "file_refs", "summary", "evidence", "finding_fingerprint", "suggested_action"} {
+		if _, exists := finding[key]; !exists {
+			t.Fatalf("missing finding key %q in result json: %s", key, string(raw))
+		}
+	}
+}
+
+func TestRequestJSONMatchesToolSchemaFieldNames(t *testing.T) {
+	request := Request{
+		AgentType:      AgentReviewer,
+		TaskID:         "Sprint-04/Task-01",
+		Attempt:        2,
+		TimeoutSeconds: 120,
+		ContextRefs: ContextRefs{
+			SprintID:     "Sprint-04",
+			WorktreePath: "/repo/worktree",
+			ArtifactRefs: ArtifactRefs{
+				Log: "logs/input.log",
+			},
+		},
+	}
+
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	for _, key := range []string{"agent_type", "task_id", "attempt", "timeout_seconds", "context_refs"} {
+		if _, ok := value[key]; !ok {
+			t.Fatalf("missing key %q in request json: %s", key, string(raw))
+		}
+	}
+
+	contextRefs, ok := value["context_refs"].(map[string]any)
+	if !ok {
+		t.Fatalf("context_refs is not an object: %T", value["context_refs"])
+	}
+	for _, key := range []string{"sprint_id", "worktree_path", "artifact_refs"} {
+		if _, ok := contextRefs[key]; !ok {
+			t.Fatalf("missing context_refs key %q in request json: %s", key, string(raw))
+		}
+	}
+}
+
+func TestExecuteMapsRequestTimeoutSeconds(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(ctx context.Context, req CommandRequest) (CommandResult, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("expected timeout deadline on runner context")
+			}
+			remaining := time.Until(deadline)
+			if remaining <= 0 || remaining > 2*time.Second {
+				t.Fatalf("unexpected remaining timeout: %s", remaining)
+			}
+
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			if err := os.WriteFile(lastMessagePath, []byte(`{"status":"success","summary":"ok","next_action":"done","failure_fingerprint":null,"artifact_refs":null,"findings":null}`), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	response := executor.Execute(context.Background(), Request{
+		AgentType:      AgentDeveloper,
+		TaskID:         "Sprint-04/Task-01",
+		TimeoutSeconds: 1,
+	}, ExecuteOptions{
+		PlanFile: "plan/SPRINTS-V1.md",
+		TasksDir: "plan/tasks",
+		WorkDir:  repo,
+	})
+
+	if !response.OK || response.Data == nil {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+}
+
+func TestExecuteRejectsNegativeTimeoutSeconds(t *testing.T) {
+	executor := NewExecutor(&fakeCommandRunner{})
+	response := executor.Execute(context.Background(), Request{
+		TaskID:         "Sprint-04/Task-01",
+		TimeoutSeconds: -1,
+	}, ExecuteOptions{})
+
+	if response.OK {
+		t.Fatalf("expected error response: %+v", response)
+	}
+	if response.Error == nil || response.Error.Code != ErrorCodeInvalidRequest {
+		t.Fatalf("unexpected error response: %+v", response)
+	}
+}
+
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
 
@@ -882,6 +1109,15 @@ func findFlagValue(args []string, flag string) string {
 	return ""
 }
 
+func containsAnyString(values []any, want string) bool {
+	for _, value := range values {
+		if str, ok := value.(string); ok && str == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestResultSchemaJSONIsValidJSON(t *testing.T) {
 	schema, err := resultSchemaJSON()
 	if err != nil {
@@ -898,6 +1134,17 @@ func TestResultSchemaJSONIsValidJSON(t *testing.T) {
 	}
 
 	props := value["properties"].(map[string]any)
+	status := props["status"].(map[string]any)
+	enum := status["enum"].([]any)
+	if len(enum) != len(allowedResultStatusValues) {
+		t.Fatalf("unexpected status enum count: %d", len(enum))
+	}
+	for _, expected := range []string{"success", "failed", "timeout"} {
+		if !containsAnyString(enum, expected) {
+			t.Fatalf("missing status enum value %q: %v", expected, enum)
+		}
+	}
+
 	artifactRefs := props["artifact_refs"].(map[string]any)
 	artifactAnyOf := artifactRefs["anyOf"].([]any)
 	artifactObject := artifactAnyOf[1].(map[string]any)

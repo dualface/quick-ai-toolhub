@@ -27,6 +27,14 @@ func (f fakeRunTaskExecutor) RunTask(ctx context.Context, opts agentrun.RunOptio
 	return f.run(ctx, opts)
 }
 
+type fakeRunAgentExecutor struct {
+	execute func(context.Context, agentrun.Request, agentrun.ExecuteOptions) agentrun.Response
+}
+
+func (f fakeRunAgentExecutor) Execute(ctx context.Context, req agentrun.Request, opts agentrun.ExecuteOptions) agentrun.Response {
+	return f.execute(ctx, req, opts)
+}
+
 type fakePrepareWorktreeExecutor struct {
 	execute func(context.Context, worktreeprep.Request, worktreeprep.ExecuteOptions) worktreeprep.Response
 }
@@ -132,11 +140,57 @@ func TestRunTaskStreamDisablesProgress(t *testing.T) {
 		t.Fatalf("run returned error: %v", err)
 	}
 
-	var response commandResponse
+	var response agentrun.Response
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	if !response.OK || response.Data == nil || response.Data.Status != "success" {
+		t.Fatalf("unexpected response: %s", stdout.String())
+	}
+}
+
+func TestRunAgentToolOutputsJSONResponse(t *testing.T) {
+	orig := newRunAgentExecutor
+	t.Cleanup(func() { newRunAgentExecutor = orig })
+	newRunAgentExecutor = func() runAgentExecutor {
+		return fakeRunAgentExecutor{
+			execute: func(_ context.Context, req agentrun.Request, opts agentrun.ExecuteOptions) agentrun.Response {
+				if req.TaskID != "Sprint-04/Task-01" {
+					t.Fatalf("unexpected task id: %s", req.TaskID)
+				}
+				if req.TimeoutSeconds != 90 {
+					t.Fatalf("unexpected timeout seconds: %d", req.TimeoutSeconds)
+				}
+				if opts.WorkDir == "" {
+					t.Fatal("expected workdir")
+				}
+				return agentrun.Response{
+					OK: true,
+					Data: &agentrun.Result{
+						Runner:     agentrun.RunnerCodexExec,
+						Status:     "success",
+						Summary:    "done",
+						NextAction: "proceed",
+					},
+				}
+			},
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := run(context.Background(), []string{
+		"run-agent-tool",
+		"--task-id", "Sprint-04/Task-01",
+		"--timeout-seconds", "90",
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
+	var response agentrun.Response
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !response.OK || response.Data == nil || response.Data.Runner != agentrun.RunnerCodexExec {
 		t.Fatalf("unexpected response: %s", stdout.String())
 	}
 }
@@ -181,7 +235,7 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"toolhub serve", "github-sync-tool", "prepare-worktree-tool", "--sprint-id", "--task-id", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--no-progress"} {
+	for _, needle := range []string{"toolhub serve", "github-sync-tool", "prepare-worktree-tool", "run-agent-tool", "--sprint-id", "--task-id", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--timeout-seconds", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}
