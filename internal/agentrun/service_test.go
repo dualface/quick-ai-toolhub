@@ -1159,6 +1159,8 @@ agents:
 - Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.
 - After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.
 - For tool-contract tasks, audit adjacent required fields, enum values, uniqueness constraints, empty-input combinations, and contradictory status/result combinations touched by the change.
+- When multiple signals can coexist, explicitly separate metadata from the final decision and check which combinations should preserve both.
+- For non-trivial decision logic, reason through the decision table before coding and add regression tests for combinations such as blocking + conflict, blocking + supplemental-review, and invalid-input + terminal status.
 - After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.
 - Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.
 - Run the smallest validation that proves both the reported issue and the contract-level behavior are covered before finishing.
@@ -1461,10 +1463,12 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 		"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
 		"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
 		"After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.",
+		"When multiple signals can coexist, explicitly separate metadata from the final decision and check which combinations should preserve both.",
 		"Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.",
 		"After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
 		"- Contract Checklist:",
 		"- Adjacent Contract Audit:",
+		"- Decision Table Audit:",
 		"- Validation Checklist:",
 		"- Acceptance Sweep:",
 		"- latest_qa_artifact_refs:",

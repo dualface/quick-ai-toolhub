@@ -48,6 +48,7 @@ func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesy
 		writePromptList(&b, "Contract Checklist", buildDeveloperContractChecklist(task))
 		writePromptExcerptSection(&b, "Relevant Spec Excerpts", buildRelevantSpecExcerpts(task, workdir))
 		writePromptList(&b, "Adjacent Contract Audit", buildDeveloperAdjacentAuditChecklist(task))
+		writePromptList(&b, "Decision Table Audit", buildDeveloperDecisionTableChecklist(task))
 		writePromptList(&b, "Validation Checklist", buildDeveloperValidationChecklist(task))
 		writePromptList(&b, "Acceptance Sweep", buildDeveloperAcceptanceSweepChecklist(task))
 	}
@@ -339,6 +340,18 @@ func buildDeveloperAcceptanceSweepChecklist(task *issuesync.TaskBrief) []string 
 	return checklist
 }
 
+func buildDeveloperDecisionTableChecklist(task *issuesync.TaskBrief) []string {
+	checklist := []string{
+		"When multiple signals or outcomes can coexist, separate metadata from the final decision instead of letting one implicitly erase the other.",
+		"For each non-trivial combination touched by this task, identify the expected decision precedence before coding.",
+		"Add regression coverage for combinations where blocking, conflict, supplemental-review, or invalid-input signals can coexist.",
+	}
+	if len(inferReferencedToolIDs(task)) > 0 {
+		checklist = append(checklist, "For tool-contract tasks, explicitly check whether each signal is metadata-only, decision-driving, or both, and verify the final decision still matches the documented contract.")
+	}
+	return checklist
+}
+
 func buildRelevantSpecExcerpts(task *issuesync.TaskBrief, workdir string) []promptExcerpt {
 	toolIDs := inferReferencedToolIDs(task)
 	if len(toolIDs) == 0 {
@@ -441,6 +454,8 @@ func defaultRoleInstructions(agentType AgentType) string {
 			"- Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.",
 			"- After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.",
 			"- For tool-contract tasks, audit adjacent required fields, enum values, uniqueness constraints, empty-input combinations, and contradictory status/result combinations touched by the change.",
+			"- When multiple signals can coexist, explicitly separate metadata from the final decision and check which combinations should preserve both.",
+			"- For non-trivial decision logic, reason through the decision table before coding and add regression tests for combinations such as blocking + conflict, blocking + supplemental-review, and invalid-input + terminal status.",
 			"- After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
 			"- Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.",
 			"- Run the smallest validation that proves both the reported issue and the contract-level behavior are covered before finishing.",
