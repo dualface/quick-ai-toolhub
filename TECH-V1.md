@@ -340,7 +340,32 @@ response.data:
   aggregated_findings: [finding]
   decision: pass | request_changes | awaiting_human
   summary: string
+  has_critical_finding: true | false
+  has_blocking_finding: true | false
+  has_conflict: true | false
+  has_reviewer_escalation: true | false
+  needs_supplemental_review: true | false
+  supplemental_review?:
+    required: true | false
+    candidate_lenses: [string]
+    reason: string
 ```
+
+约束：
+
+- `summary` 只做人类可读摘要；调用方不得解析 `summary` 文本代替结构化字段做流程分支
+- `review_results[].reviewer_id` 必须非空且在同一请求内唯一
+- `review_results[].lens` 必须非空且在同一请求内唯一
+- `review_results[].status` 必须属于允许的 reviewer 结果枚举或合法别名；未知状态必须返回 `invalid_request`
+- 任意带 `with_findings` 语义的 reviewer `status` 必须携带至少一条 finding
+- 每条 finding 必须保留非空 `file_refs`
+- 最终 `decision` 与结构化 signals 的优先级必须满足：
+  - 发现无效输入时，工具返回 `ok: false` / `error.code=invalid_request`
+  - `has_conflict=true` 或 `has_reviewer_escalation=true` 时，`decision=awaiting_human`
+  - 否则若 `has_critical_finding=true` 或 `has_blocking_finding=true`，`decision=request_changes`
+  - 否则若 `needs_supplemental_review=true`，`decision=pass`，并通过 `supplemental_review` 结构化返回继续验证所需信息
+  - 其他情况返回 `decision=pass`
+- 当 `has_conflict=true` 与 `has_blocking_finding=true` 并存时，最终 `decision` 仍必须按冲突优先级返回 `awaiting_human`，但 `has_blocking_finding` 不得被清空
 
 ### `task-pr-tool`
 

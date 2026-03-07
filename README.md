@@ -129,6 +129,10 @@ Sprint-01
 - 单个 `Reviewer` 提出的中低置信度 finding 不得直接阻塞，必须先经过补充审查或二次验证
 - 如果多个 `Reviewer` 结论冲突，必须发起补充审查，或将该问题升级为人工判定项
 - 聚合后的审查结论必须以结构化摘要形式附加到 `Task PR` 或 `Sprint PR`
+- 聚合结果中的 `summary` 只做人类可读摘要，不得作为唯一机器分支依据；调用方必须优先消费结构化字段
+- 聚合结果至少必须结构化暴露：`has_critical_finding`、`has_blocking_finding`、`has_conflict`、`has_reviewer_escalation`、`needs_supplemental_review`
+- 当 `blocking` 与 `conflict` 并存时，`conflict` 的人工/补充审查要求拥有更高的最终决策优先级，但 `blocking` 信号本身不得丢失
+- 当只存在 `needs_supplemental_review` 且不存在 `blocking` / `conflict` / `reviewer_escalation` 时，聚合结果应保留非阻塞决策，同时显式返回补充审查信号供上层继续验证
 
 ## 上下文管理原则
 

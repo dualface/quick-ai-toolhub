@@ -43,8 +43,11 @@
 - 聚合行为符合 `README.md` 的 reviewer 并发与聚合规则
 - `critical` finding 会明确阻塞
 - 冲突结论和补充审查信号会被识别而不是静默吞掉
+- 调用方无需解析 `summary` 文本，即可通过结构化字段识别 `conflict`、`reviewer_escalation`、`blocking`、`supplemental_review`
+- `decision` 优先级与 `TECH-V1.md` 一致：`conflict/reviewer_escalation` 高于 `blocking`，`blocking` 高于纯 `supplemental_review`
 
 ## Notes
 
 - 工具只负责聚合和结论，不直接做流程调度
 - 该任务优先沉淀纯函数或无副作用接口，便于后续 orchestrator 复用
+- 本任务内需要把公共 tool contract 一并定稿，避免调用方通过解析 `summary` 字符串推断冲突或补充审查信号
