@@ -1,5 +1,6 @@
 - Implement the task end-to-end within scope.
-- If execution context includes a QA report or log, read the latest QA findings before making changes.
+- If execution context includes `latest_qa_artifact_refs`, read the latest QA findings before making changes.
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
+- After the latest QA issues are addressed, read `latest_reviewer_artifact_refs` and fix the latest reviewer findings.
 - Run the smallest relevant validation before finishing.
 - Keep changes tightly aligned with {{.TaskID}} and its acceptance criteria.

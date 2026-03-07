@@ -125,25 +125,35 @@ func TestRunTaskExplicitModelOverridesConfig(t *testing.T) {
 	}
 }
 
-func TestRunTaskDeveloperUsesLatestQAArtifactsAsContext(t *testing.T) {
+func TestRunTaskDeveloperUsesLatestFeedbackArtifactsAsContext(t *testing.T) {
 	repo := setupTestRepo(t)
-	oldReport, oldLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 2, "default", "20260306T115900.000000000Z-oldrun")
-	newReport, newLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 10, "default", "20260306T120000.000000000Z-newrun")
+	oldQAReport, oldQALog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 2, "default", "20260306T115900.000000000Z-oldqa")
+	newQAReport, newQALog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 10, "default", "20260306T120000.000000000Z-newqa")
+	oldReviewerReport, oldReviewerLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentReviewer, 1, "default", "20260306T115500.000000000Z-oldreview")
+	newReviewerReport, newReviewerLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentReviewer, 4, "default", "20260306T120100.000000000Z-newreview")
 
 	runner := &fakeCommandRunner{
 		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
 			prompt := string(req.Stdin)
-			if !strings.Contains(prompt, "- report: "+newReport) {
+			if !strings.Contains(prompt, "- latest_qa_artifact_refs:\n  - log: "+newQALog+"\n  - report: "+newQAReport) {
 				t.Fatalf("expected latest QA report in prompt, got:\n%s", prompt)
 			}
-			if !strings.Contains(prompt, "- log: "+newLog) {
-				t.Fatalf("expected latest QA log in prompt, got:\n%s", prompt)
+			if !strings.Contains(prompt, "- latest_reviewer_artifact_refs:\n  - log: "+newReviewerLog+"\n  - report: "+newReviewerReport) {
+				t.Fatalf("expected latest reviewer report in prompt, got:\n%s", prompt)
 			}
-			if strings.Contains(prompt, oldReport) || strings.Contains(prompt, oldLog) {
-				t.Fatalf("expected older QA artifacts to be ignored, got:\n%s", prompt)
+			for _, stale := range []string{oldQAReport, oldQALog, oldReviewerReport, oldReviewerLog} {
+				if strings.Contains(prompt, stale) {
+					t.Fatalf("expected older feedback artifacts to be ignored, got:\n%s", prompt)
+				}
 			}
 			if !strings.Contains(prompt, "Fix the concrete problems called out by that latest QA round before doing any follow-on work.") {
 				t.Fatalf("expected QA repair instruction in prompt, got:\n%s", prompt)
+			}
+			if !strings.Contains(prompt, "After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.") {
+				t.Fatalf("expected reviewer repair instruction in prompt, got:\n%s", prompt)
+			}
+			if strings.Index(prompt, "latest_qa_artifact_refs") > strings.Index(prompt, "latest_reviewer_artifact_refs") {
+				t.Fatalf("expected QA artifacts to appear before reviewer artifacts, got:\n%s", prompt)
 			}
 
 			lastMessagePath := findFlagValue(req.Args, "-o")
@@ -167,18 +177,21 @@ func TestRunTaskDeveloperUsesLatestQAArtifactsAsContext(t *testing.T) {
 	}
 }
 
-func TestRunTaskDeveloperSkipsAutoQAArtifactsWhenExplicitContextProvided(t *testing.T) {
+func TestRunTaskDeveloperKeepsExplicitArtifactContextAlongsideAutoFeedback(t *testing.T) {
 	repo := setupTestRepo(t)
-	autoReport, autoLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 3, "default", "20260306T120000.000000000Z-qarun")
+	autoQAReport, autoQALog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 3, "default", "20260306T120000.000000000Z-qarun")
+	autoReviewerReport, autoReviewerLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentReviewer, 2, "default", "20260306T120100.000000000Z-reviewrun")
 
 	runner := &fakeCommandRunner{
 		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
 			prompt := string(req.Stdin)
-			if !strings.Contains(prompt, "- report: manual/report.json") {
+			if !strings.Contains(prompt, "- artifact_refs:") || !strings.Contains(prompt, "  - report: manual/report.json") {
 				t.Fatalf("expected explicit report in prompt, got:\n%s", prompt)
 			}
-			if strings.Contains(prompt, autoReport) || strings.Contains(prompt, autoLog) {
-				t.Fatalf("expected auto QA artifacts to stay disabled when explicit context is provided, got:\n%s", prompt)
+			for _, expected := range []string{autoQAReport, autoQALog, autoReviewerReport, autoReviewerLog} {
+				if !strings.Contains(prompt, expected) {
+					t.Fatalf("expected auto feedback artifacts to still be present when explicit context is provided, got:\n%s", prompt)
+				}
 			}
 
 			lastMessagePath := findFlagValue(req.Args, "-o")
@@ -750,8 +763,9 @@ agents:
 `)+"\n")
 	mustWriteFile(t, filepath.Join(root, "prompts/agents/developer.md"), strings.TrimSpace(`
 - Implement the task end-to-end within scope.
-- If execution context includes a QA report or log, read the latest QA findings before making changes.
+- If execution context includes latest_qa_artifact_refs, read the latest QA findings before making changes.
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
+- After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.
 - Run the smallest relevant validation before finishing.
 - Finish {{.TaskID}} in scope.
 `)+"\n")
@@ -936,7 +950,7 @@ func TestBuildPromptQAIncludesValidationRules(t *testing.T) {
 	}
 }
 
-func TestBuildPromptDeveloperIncludesQARepairRules(t *testing.T) {
+func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 	task := &issuesync.TaskBrief{
 		TaskID: "Sprint-04/Task-01",
 		Goal:   "Goal",
@@ -946,18 +960,27 @@ func TestBuildPromptDeveloperIncludesQARepairRules(t *testing.T) {
 	prompt := buildPrompt(AgentDeveloper, task, sprint, 2, "", ContextRefs{
 		SprintID:     "Sprint-04",
 		WorktreePath: "/repo",
-		ArtifactRefs: ArtifactRefs{
+		QAArtifactRefs: ArtifactRefs{
 			Report: ".toolhub/runs/Sprint-04/Task-01/qa/attempt-02/default/run/result.json",
+		},
+		ReviewerArtifactRefs: ArtifactRefs{
+			Report: ".toolhub/runs/Sprint-04/Task-01/reviewer/attempt-01/default/run/result.json",
 		},
 	}, "/repo", "")
 
 	for _, needle := range []string{
-		"If execution context includes a QA report or log, read the latest QA findings before making changes.",
+		"If execution context includes latest_qa_artifact_refs, read the latest QA findings before making changes.",
 		"Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
+		"After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.",
+		"- latest_qa_artifact_refs:",
+		"- latest_reviewer_artifact_refs:",
 	} {
 		if !strings.Contains(prompt, needle) {
 			t.Fatalf("missing %q in prompt:\n%s", needle, prompt)
 		}
+	}
+	if strings.Index(prompt, "latest_qa_artifact_refs") > strings.Index(prompt, "latest_reviewer_artifact_refs") {
+		t.Fatalf("expected QA artifact refs to appear before reviewer artifact refs, got:\n%s", prompt)
 	}
 }
 

@@ -66,7 +66,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, err
 	}
 	applyDefaultContextRefs(&opts, sprint)
-	applyLatestQAContextRefs(&opts, outputRoot)
+	applyAutomaticFeedbackContextRefs(&opts, outputRoot)
 
 	settings, err := loadAgentSettings(opts.WorkDir, opts.ConfigFile)
 	if err != nil {
@@ -294,33 +294,33 @@ func applyDefaultContextRefs(opts *RunOptions, sprint *issuesync.Sprint) {
 	}
 }
 
-func applyLatestQAContextRefs(opts *RunOptions, outputRoot string) {
+func applyAutomaticFeedbackContextRefs(opts *RunOptions, outputRoot string) {
 	if opts.AgentType != AgentDeveloper {
 		return
 	}
-	if hasExplicitArtifactContext(opts.ContextRefs.ArtifactRefs) {
-		return
-	}
 
-	refs, ok := findLatestAgentRunArtifactRefs(opts.WorkDir, outputRoot, opts.TaskID, AgentQA)
-	if !ok {
-		return
+	if refs, ok := findLatestAgentRunArtifactRefs(opts.WorkDir, outputRoot, opts.TaskID, AgentQA); ok {
+		opts.ContextRefs.QAArtifactRefs = fillMissingArtifactRefs(opts.ContextRefs.QAArtifactRefs, refs)
 	}
-	if opts.ContextRefs.ArtifactRefs.Log == "" {
-		opts.ContextRefs.ArtifactRefs.Log = refs.Log
-	}
-	if opts.ContextRefs.ArtifactRefs.Patch == "" {
-		opts.ContextRefs.ArtifactRefs.Patch = refs.Patch
-	}
-	if opts.ContextRefs.ArtifactRefs.Report == "" {
-		opts.ContextRefs.ArtifactRefs.Report = refs.Report
+	if refs, ok := findLatestAgentRunArtifactRefs(opts.WorkDir, outputRoot, opts.TaskID, AgentReviewer); ok {
+		opts.ContextRefs.ReviewerArtifactRefs = fillMissingArtifactRefs(opts.ContextRefs.ReviewerArtifactRefs, refs)
 	}
 }
 
-func hasExplicitArtifactContext(refs ArtifactRefs) bool {
-	return strings.TrimSpace(refs.Log) != "" ||
-		strings.TrimSpace(refs.Patch) != "" ||
-		strings.TrimSpace(refs.Report) != ""
+func fillMissingArtifactRefs(current, defaults ArtifactRefs) ArtifactRefs {
+	if current.Log == "" {
+		current.Log = defaults.Log
+	}
+	if current.Worktree == "" {
+		current.Worktree = defaults.Worktree
+	}
+	if current.Patch == "" {
+		current.Patch = defaults.Patch
+	}
+	if current.Report == "" {
+		current.Report = defaults.Report
+	}
+	return current
 }
 
 func findLatestAgentRunArtifactRefs(workdir, outputRoot, taskID string, agentType AgentType) (ArtifactRefs, bool) {

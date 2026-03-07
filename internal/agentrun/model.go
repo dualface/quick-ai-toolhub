@@ -39,10 +39,12 @@ type RunOptions struct {
 }
 
 type ContextRefs struct {
-	SprintID       string
-	WorktreePath   string
-	GitHubPRNumber int
-	ArtifactRefs   ArtifactRefs
+	SprintID             string
+	WorktreePath         string
+	GitHubPRNumber       int
+	ArtifactRefs         ArtifactRefs
+	QAArtifactRefs       ArtifactRefs
+	ReviewerArtifactRefs ArtifactRefs
 }
 
 type ArtifactRefs struct {

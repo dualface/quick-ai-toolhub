@@ -43,21 +43,9 @@ func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesy
 	if contextRefs.GitHubPRNumber > 0 {
 		fmt.Fprintf(&b, "- github_pr_number: %d\n", contextRefs.GitHubPRNumber)
 	}
-	if contextRefs.ArtifactRefs.Log != "" || contextRefs.ArtifactRefs.Worktree != "" || contextRefs.ArtifactRefs.Patch != "" || contextRefs.ArtifactRefs.Report != "" {
-		b.WriteString("- artifact_refs:\n")
-		if contextRefs.ArtifactRefs.Log != "" {
-			fmt.Fprintf(&b, "  - log: %s\n", contextRefs.ArtifactRefs.Log)
-		}
-		if contextRefs.ArtifactRefs.Worktree != "" {
-			fmt.Fprintf(&b, "  - worktree: %s\n", contextRefs.ArtifactRefs.Worktree)
-		}
-		if contextRefs.ArtifactRefs.Patch != "" {
-			fmt.Fprintf(&b, "  - patch: %s\n", contextRefs.ArtifactRefs.Patch)
-		}
-		if contextRefs.ArtifactRefs.Report != "" {
-			fmt.Fprintf(&b, "  - report: %s\n", contextRefs.ArtifactRefs.Report)
-		}
-	}
+	writeArtifactRefsSection(&b, "artifact_refs", contextRefs.ArtifactRefs)
+	writeArtifactRefsSection(&b, "latest_qa_artifact_refs", contextRefs.QAArtifactRefs)
+	writeArtifactRefsSection(&b, "latest_reviewer_artifact_refs", contextRefs.ReviewerArtifactRefs)
 	b.WriteString("\n")
 
 	if strings.TrimSpace(roleInstructions) == "" {
@@ -134,13 +122,38 @@ func relativeToWorkdir(workdir, path string) string {
 	return filepath.ToSlash(rel)
 }
 
+func writeArtifactRefsSection(b *strings.Builder, heading string, refs ArtifactRefs) {
+	if !hasArtifactRefs(refs) {
+		return
+	}
+
+	fmt.Fprintf(b, "- %s:\n", heading)
+	if refs.Log != "" {
+		fmt.Fprintf(b, "  - log: %s\n", refs.Log)
+	}
+	if refs.Worktree != "" {
+		fmt.Fprintf(b, "  - worktree: %s\n", refs.Worktree)
+	}
+	if refs.Patch != "" {
+		fmt.Fprintf(b, "  - patch: %s\n", refs.Patch)
+	}
+	if refs.Report != "" {
+		fmt.Fprintf(b, "  - report: %s\n", refs.Report)
+	}
+}
+
+func hasArtifactRefs(refs ArtifactRefs) bool {
+	return refs.Log != "" || refs.Worktree != "" || refs.Patch != "" || refs.Report != ""
+}
+
 func defaultRoleInstructions(agentType AgentType) string {
 	switch agentType {
 	case AgentDeveloper:
 		return strings.Join([]string{
 			"- Implement the task end-to-end within scope.",
-			"- If execution context includes a QA report or log, read the latest QA findings before making changes.",
+			"- If execution context includes latest_qa_artifact_refs, read the latest QA findings before making changes.",
 			"- Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
+			"- After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.",
 			"- Run the smallest relevant validation before finishing.",
 		}, "\n")
 	case AgentQA:
