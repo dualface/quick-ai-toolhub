@@ -944,13 +944,14 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	}
 
 	done := make(chan struct{})
+	startedAt := time.Now()
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintln(out, "[progress] still running")
+				fmt.Fprintf(out, "[progress] still running (%s)\n", formatHeartbeatElapsed(time.Since(startedAt)))
 			case <-ctx.Done():
 				return
 			case <-done:
@@ -962,6 +963,23 @@ func startProgressHeartbeat(ctx context.Context, out io.Writer, interval time.Du
 	return func() {
 		close(done)
 	}
+}
+
+func formatHeartbeatElapsed(elapsed time.Duration) string {
+	if elapsed < time.Minute {
+		return "<1m"
+	}
+
+	elapsed = elapsed.Truncate(time.Minute)
+	hours := elapsed / time.Hour
+	minutes := (elapsed % time.Hour) / time.Minute
+	if hours == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	if minutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%dm", hours, minutes)
 }
 
 func codexSandbox(agentType AgentType) string {
