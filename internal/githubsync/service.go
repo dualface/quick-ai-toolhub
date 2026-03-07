@@ -27,11 +27,19 @@ type GitHubReader interface {
 	ListSubIssues(ctx context.Context, req toolgithub.ListSubIssuesRequest) ([]toolgithub.IssueLink, error)
 	ListIssueDependencies(ctx context.Context, req toolgithub.ListIssueDependenciesRequest) ([]toolgithub.IssueLink, error)
 	ListPullRequests(ctx context.Context, req toolgithub.ListPullRequestsRequest) ([]toolgithub.PullRequest, error)
+	GetPullRequest(ctx context.Context, req toolgithub.GetPullRequestRequest) (toolgithub.PullRequest, error)
 	ListWorkflowRuns(ctx context.Context, req toolgithub.ListWorkflowRunsRequest) ([]toolgithub.WorkflowRun, error)
+	GetWorkflowRun(ctx context.Context, req toolgithub.GetWorkflowRunRequest) (toolgithub.WorkflowRun, error)
 }
 
 type ProjectionStore interface {
 	ApplyGitHubProjection(ctx context.Context, snapshot store.GitHubProjectionSnapshot) error
+	RunInTx(ctx context.Context, fn func(context.Context, store.BaseStore) error) error
+	FindTrackedSprintIssueNumbersForIssue(ctx context.Context, githubIssueNumber int) ([]int, error)
+	FindTrackedSprintIssueNumberBySprintID(ctx context.Context, sprintID string) (int, bool, error)
+	FindTrackedSprintIssueNumberByPullRequest(ctx context.Context, githubPRNumber int) (int, bool, error)
+	FindTrackedSprintIssueNumberByCIRun(ctx context.Context, githubRunID int64) (int, bool, error)
+	FindTrackedSprintIssueNumberByHead(ctx context.Context, headSHA, headBranch string) (int, bool, error)
 }
 
 type Service struct {
@@ -52,6 +60,10 @@ func New(deps Dependencies) *Service {
 		github: deps.GitHub,
 		store:  deps.Store,
 	}
+}
+
+func (s *Service) Name() string {
+	return "githubsync"
 }
 
 func componentLogger(logger *slog.Logger) *slog.Logger {
@@ -118,8 +130,30 @@ func (s *Service) execute(ctx context.Context, req Request, opts ExecuteOptions)
 			return nil, err
 		}
 		return s.fullReconcile(ctx, payload, opts)
-	case OpIngestWebhook, OpReconcileIssue, OpReconcilePullReq, OpReconcileCIRun:
-		return nil, newValidationError("unsupported op %q", req.Op)
+	case OpIngestWebhook:
+		var payload IngestWebhookPayload
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return nil, err
+		}
+		return s.ingestWebhook(ctx, payload, opts)
+	case OpReconcileIssue:
+		var payload ReconcileIssuePayload
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return nil, err
+		}
+		return s.reconcileIssue(ctx, payload, opts)
+	case OpReconcilePullReq:
+		var payload ReconcilePullRequestPayload
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return nil, err
+		}
+		return s.reconcilePullRequest(ctx, payload, opts)
+	case OpReconcileCIRun:
+		var payload ReconcileCIRunPayload
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return nil, err
+		}
+		return s.reconcileCIRun(ctx, payload, opts)
 	case "":
 		return nil, newValidationError("op is required")
 	default:
@@ -178,6 +212,387 @@ func (s *Service) fullReconcile(ctx context.Context, payload FullReconcilePayloa
 	}
 
 	return changedEntities, nil
+}
+
+func (s *Service) ingestWebhook(ctx context.Context, payload IngestWebhookPayload, opts ExecuteOptions) ([]ChangedEntity, error) {
+	if err := validateIngestWebhookPayload(payload); err != nil {
+		return nil, err
+	}
+
+	action, err := decodeWebhookAction(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var changedEntities []ChangedEntity
+	err = s.store.RunInTx(ctx, func(ctx context.Context, tx store.BaseStore) error {
+		appendResult, err := tx.AppendEvent(ctx, webhookEventPayload(payload, action))
+		if err != nil {
+			return err
+		}
+		if appendResult.Deduplicated || action.Reconcile == nil {
+			return nil
+		}
+
+		snapshot, entities, err := s.targetedSnapshot(ctx, action.Reconcile.Op, action.Reconcile.Payload, opts, action.Reconcile.Reason)
+		if err != nil {
+			return err
+		}
+		if len(entities) == 0 || len(snapshot.Sprints) == 0 {
+			return nil
+		}
+		if err := tx.ApplyGitHubProjection(ctx, snapshot); err != nil {
+			return fmt.Errorf("apply github projection: %w", err)
+		}
+		changedEntities = entities
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return changedEntities, nil
+}
+
+func (s *Service) reconcileIssue(ctx context.Context, payload ReconcileIssuePayload, opts ExecuteOptions) ([]ChangedEntity, error) {
+	if payload.GitHubIssueNumber <= 0 {
+		return nil, newValidationError("reconcile_issue.github_issue_number must be greater than zero")
+	}
+	return s.applyTargetedReconcile(ctx, OpReconcileIssue, payload, opts, "targeted_issue")
+}
+
+func (s *Service) reconcilePullRequest(ctx context.Context, payload ReconcilePullRequestPayload, opts ExecuteOptions) ([]ChangedEntity, error) {
+	if payload.GitHubPRNumber <= 0 {
+		return nil, newValidationError("reconcile_pull_request.github_pr_number must be greater than zero")
+	}
+	return s.applyTargetedReconcile(ctx, OpReconcilePullReq, payload, opts, "targeted_pull_request")
+}
+
+func (s *Service) reconcileCIRun(ctx context.Context, payload ReconcileCIRunPayload, opts ExecuteOptions) ([]ChangedEntity, error) {
+	if payload.GitHubRunID <= 0 {
+		return nil, newValidationError("reconcile_ci_run.github_run_id must be greater than zero")
+	}
+	return s.applyTargetedReconcile(ctx, OpReconcileCIRun, payload, opts, "targeted_ci_run")
+}
+
+func (s *Service) applyTargetedReconcile(ctx context.Context, op Operation, payload any, opts ExecuteOptions, reason string) ([]ChangedEntity, error) {
+	snapshot, changedEntities, err := s.targetedSnapshot(ctx, op, payload, opts, reason)
+	if err != nil {
+		return nil, err
+	}
+	if len(changedEntities) == 0 || len(snapshot.Sprints) == 0 {
+		return []ChangedEntity{}, nil
+	}
+	if err := s.store.ApplyGitHubProjection(ctx, snapshot); err != nil {
+		return nil, fmt.Errorf("apply github projection: %w", err)
+	}
+	return changedEntities, nil
+}
+
+func (s *Service) targetedSnapshot(
+	ctx context.Context,
+	op Operation,
+	payload any,
+	opts ExecuteOptions,
+	reason string,
+) (store.GitHubProjectionSnapshot, []ChangedEntity, error) {
+	scope := toolgithub.Scope{
+		WorkDir: opts.WorkDir,
+		Repo:    opts.Repo,
+	}
+
+	var (
+		sprintIssueNums []int
+		err             error
+	)
+	switch op {
+	case OpReconcileIssue:
+		sprintIssueNums, err = s.resolveSprintIssueNumbersForIssue(ctx, scope, payload.(ReconcileIssuePayload).GitHubIssueNumber)
+	case OpReconcilePullReq:
+		sprintIssueNums, err = s.resolveSprintIssueNumbersForPullRequest(ctx, scope, payload.(ReconcilePullRequestPayload).GitHubPRNumber)
+	case OpReconcileCIRun:
+		sprintIssueNums, err = s.resolveSprintIssueNumbersForWorkflowRun(ctx, scope, payload.(ReconcileCIRunPayload).GitHubRunID)
+	default:
+		return store.GitHubProjectionSnapshot{}, nil, newValidationError("unsupported op %q", op)
+	}
+	if err != nil {
+		return store.GitHubProjectionSnapshot{}, nil, err
+	}
+	if len(sprintIssueNums) == 0 {
+		return store.GitHubProjectionSnapshot{}, []ChangedEntity{}, nil
+	}
+
+	snapshot, changedEntities, err := s.buildScopedSnapshot(ctx, scope, opts.DefaultBranch, reason, sprintIssueNums)
+	if err != nil {
+		return store.GitHubProjectionSnapshot{}, nil, err
+	}
+	return snapshot, changedEntities, nil
+}
+
+func (s *Service) buildScopedSnapshot(
+	ctx context.Context,
+	scope toolgithub.Scope,
+	defaultBranch string,
+	reason string,
+	sprintIssueNumbers []int,
+) (store.GitHubProjectionSnapshot, []ChangedEntity, error) {
+	parsedSprints, err := s.loadScopedSprints(ctx, scope, sprintIssueNumbers)
+	if err != nil {
+		return store.GitHubProjectionSnapshot{}, nil, err
+	}
+
+	parsedTasks, dependencies, err := s.loadTasksAndDependencies(ctx, scope, parsedSprints, nil)
+	if err != nil {
+		return store.GitHubProjectionSnapshot{}, nil, err
+	}
+
+	return s.buildSnapshot(ctx, scope, defaultBranch, reason, parsedSprints, parsedTasks, dependencies)
+}
+
+func (s *Service) loadScopedSprints(ctx context.Context, scope toolgithub.Scope, sprintIssueNumbers []int) ([]parsedSprint, error) {
+	parsed := make([]parsedSprint, 0, len(sprintIssueNumbers))
+	sprintIDs := make(map[string]int, len(sprintIssueNumbers))
+	sprintSequences := make(map[int]int, len(sprintIssueNumbers))
+	seenIssues := make(map[int]struct{}, len(sprintIssueNumbers))
+
+	for _, sprintIssueNumber := range sprintIssueNumbers {
+		if sprintIssueNumber <= 0 {
+			continue
+		}
+		if _, ok := seenIssues[sprintIssueNumber]; ok {
+			continue
+		}
+		seenIssues[sprintIssueNumber] = struct{}{}
+
+		issue, err := s.github.GetIssue(ctx, toolgithub.GetIssueRequest{
+			Scope:             scope,
+			GitHubIssueNumber: sprintIssueNumber,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("get sprint issue #%d: %w", sprintIssueNumber, err)
+		}
+
+		item, err := parseSprintIssue(issue)
+		if err != nil {
+			return nil, err
+		}
+		if existing, ok := sprintIDs[item.Snapshot.SprintID]; ok {
+			return nil, newValidationError(
+				"duplicate sprint id %s on issues #%d and #%d",
+				item.Snapshot.SprintID,
+				existing,
+				item.Issue.GitHubIssueNumber,
+			)
+		}
+		if existing, ok := sprintSequences[item.Snapshot.SequenceNo]; ok {
+			return nil, newValidationError(
+				"duplicate sprint sequence %d on issues #%d and #%d",
+				item.Snapshot.SequenceNo,
+				existing,
+				item.Issue.GitHubIssueNumber,
+			)
+		}
+
+		subIssues, err := s.github.ListSubIssues(ctx, toolgithub.ListSubIssuesRequest{
+			Scope:             scope,
+			ParentIssueNumber: sprintIssueNumber,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list sub-issues for sprint #%d: %w", sprintIssueNumber, err)
+		}
+		seenSubIssues := make(map[int]struct{}, len(subIssues))
+		for _, subIssue := range subIssues {
+			if _, ok := seenSubIssues[subIssue.GitHubIssueNumber]; ok {
+				continue
+			}
+			seenSubIssues[subIssue.GitHubIssueNumber] = struct{}{}
+			item.TaskIssueNumbers = append(item.TaskIssueNumbers, subIssue.GitHubIssueNumber)
+		}
+
+		sprintIDs[item.Snapshot.SprintID] = item.Issue.GitHubIssueNumber
+		sprintSequences[item.Snapshot.SequenceNo] = item.Issue.GitHubIssueNumber
+		parsed = append(parsed, item)
+	}
+
+	sort.Slice(parsed, func(i, j int) bool {
+		return parsed[i].Snapshot.SequenceNo < parsed[j].Snapshot.SequenceNo
+	})
+	return parsed, nil
+}
+
+func (s *Service) resolveSprintIssueNumbersForIssue(ctx context.Context, scope toolgithub.Scope, githubIssueNumber int) ([]int, error) {
+	values, err := s.store.FindTrackedSprintIssueNumbersForIssue(ctx, githubIssueNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	issue, err := s.github.GetIssue(ctx, toolgithub.GetIssueRequest{
+		Scope:             scope,
+		GitHubIssueNumber: githubIssueNumber,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get issue %d: %w", githubIssueNumber, err)
+	}
+
+	if issue.HasLabel("kind/sprint") {
+		values = append(values, githubIssueNumber)
+		return dedupeSprintIssueNumbers(values), nil
+	}
+
+	parents, err := s.findOpenParentSprintIssueNumbersForTask(ctx, scope, githubIssueNumber)
+	if err != nil {
+		return nil, err
+	}
+	values = append(values, parents...)
+	return dedupeSprintIssueNumbers(values), nil
+}
+
+func (s *Service) resolveSprintIssueNumbersForPullRequest(ctx context.Context, scope toolgithub.Scope, githubPRNumber int) ([]int, error) {
+	values := make([]int, 0, 2)
+	if tracked, ok, err := s.store.FindTrackedSprintIssueNumberByPullRequest(ctx, githubPRNumber); err != nil {
+		return nil, err
+	} else if ok {
+		values = append(values, tracked)
+	}
+
+	pr, err := s.github.GetPullRequest(ctx, toolgithub.GetPullRequestRequest{
+		Scope:          scope,
+		GitHubPRNumber: githubPRNumber,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get pull request %d: %w", githubPRNumber, err)
+	}
+
+	if sprintID, _, ok := parseTaskBranch(pr.HeadBranch); ok {
+		value, ok, err := s.resolveSprintIssueNumberBySprintID(ctx, scope, sprintID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			values = append(values, value)
+		}
+	} else if sprintID, ok := parseSprintBranch(pr.HeadBranch); ok {
+		value, ok, err := s.resolveSprintIssueNumberBySprintID(ctx, scope, sprintID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			values = append(values, value)
+		}
+	}
+
+	return dedupeSprintIssueNumbers(values), nil
+}
+
+func (s *Service) resolveSprintIssueNumbersForWorkflowRun(ctx context.Context, scope toolgithub.Scope, githubRunID int64) ([]int, error) {
+	values := make([]int, 0, 2)
+	if tracked, ok, err := s.store.FindTrackedSprintIssueNumberByCIRun(ctx, githubRunID); err != nil {
+		return nil, err
+	} else if ok {
+		values = append(values, tracked)
+	}
+
+	run, err := s.github.GetWorkflowRun(ctx, toolgithub.GetWorkflowRunRequest{
+		Scope:       scope,
+		GitHubRunID: githubRunID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get workflow run %d: %w", githubRunID, err)
+	}
+
+	if sprintID, _, ok := parseTaskBranch(run.HeadBranch); ok {
+		value, ok, err := s.resolveSprintIssueNumberBySprintID(ctx, scope, sprintID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			values = append(values, value)
+		}
+	} else if sprintID, ok := parseSprintBranch(run.HeadBranch); ok {
+		value, ok, err := s.resolveSprintIssueNumberBySprintID(ctx, scope, sprintID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			values = append(values, value)
+		}
+	} else if tracked, ok, err := s.store.FindTrackedSprintIssueNumberByHead(ctx, run.HeadSHA, run.HeadBranch); err != nil {
+		return nil, err
+	} else if ok {
+		values = append(values, tracked)
+	}
+
+	return dedupeSprintIssueNumbers(values), nil
+}
+
+func (s *Service) resolveSprintIssueNumberBySprintID(ctx context.Context, scope toolgithub.Scope, sprintID string) (int, bool, error) {
+	if tracked, ok, err := s.store.FindTrackedSprintIssueNumberBySprintID(ctx, sprintID); err != nil {
+		return 0, false, err
+	} else if ok {
+		return tracked, true, nil
+	}
+
+	sprintIssues, err := s.github.ListSprintIssues(ctx, toolgithub.ListSprintIssuesRequest{
+		Scope: scope,
+		Limit: defaultIssueLimit,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("list sprint issues: %w", err)
+	}
+	for _, issue := range sprintIssues {
+		parsed, err := parseSprintIssue(issue)
+		if err != nil {
+			return 0, false, err
+		}
+		if parsed.Snapshot.SprintID == sprintID {
+			return issue.GitHubIssueNumber, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+func (s *Service) findOpenParentSprintIssueNumbersForTask(ctx context.Context, scope toolgithub.Scope, taskIssueNumber int) ([]int, error) {
+	sprintIssues, err := s.github.ListSprintIssues(ctx, toolgithub.ListSprintIssuesRequest{
+		Scope: scope,
+		Limit: defaultIssueLimit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list sprint issues: %w", err)
+	}
+
+	values := make([]int, 0, 1)
+	for _, sprintIssue := range sprintIssues {
+		subIssues, err := s.github.ListSubIssues(ctx, toolgithub.ListSubIssuesRequest{
+			Scope:             scope,
+			ParentIssueNumber: sprintIssue.GitHubIssueNumber,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list sub-issues for sprint #%d: %w", sprintIssue.GitHubIssueNumber, err)
+		}
+		for _, subIssue := range subIssues {
+			if subIssue.GitHubIssueNumber == taskIssueNumber {
+				values = append(values, sprintIssue.GitHubIssueNumber)
+				break
+			}
+		}
+	}
+	return dedupeSprintIssueNumbers(values), nil
+}
+
+func dedupeSprintIssueNumbers(values []int) []int {
+	result := make([]int, 0, len(values))
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Ints(result)
+	return result
 }
 
 func (s *Service) loadSprints(ctx context.Context, scope toolgithub.Scope, sprintIssues []toolgithub.Issue) ([]parsedSprint, error) {
@@ -697,7 +1112,13 @@ func asToolError(err error) *ToolError {
 			strings.Contains(validationErr.message, "workdir is required") ||
 			strings.Contains(validationErr.message, "repo is required") ||
 			strings.Contains(validationErr.message, "default_branch is required") ||
-			strings.Contains(validationErr.message, "full_reconcile.reason") {
+			strings.Contains(validationErr.message, "full_reconcile.reason") ||
+			strings.Contains(validationErr.message, "ingest_webhook.") ||
+			strings.Contains(validationErr.message, "reconcile_issue.") ||
+			strings.Contains(validationErr.message, "reconcile_pull_request.") ||
+			strings.Contains(validationErr.message, "reconcile_ci_run.") ||
+			strings.Contains(validationErr.message, "header is required") ||
+			strings.Contains(validationErr.message, "request method must be POST") {
 			code = ErrorCodeInvalid
 		}
 		return &ToolError{

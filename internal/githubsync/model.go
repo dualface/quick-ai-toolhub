@@ -29,6 +29,24 @@ type FullReconcilePayload struct {
 	Reason string `json:"reason"`
 }
 
+type IngestWebhookPayload struct {
+	DeliveryID  string         `json:"delivery_id"`
+	EventName   string         `json:"event_name"`
+	PayloadJSON map[string]any `json:"payload_json"`
+}
+
+type ReconcileIssuePayload struct {
+	GitHubIssueNumber int `json:"github_issue_number"`
+}
+
+type ReconcilePullRequestPayload struct {
+	GitHubPRNumber int `json:"github_pr_number"`
+}
+
+type ReconcileCIRunPayload struct {
+	GitHubRunID int64 `json:"github_run_id"`
+}
+
 type Response struct {
 	OK    bool          `json:"ok"`
 	Data  *ResponseData `json:"data,omitempty"`

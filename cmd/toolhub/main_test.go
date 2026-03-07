@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +14,7 @@ import (
 	"testing"
 
 	"quick-ai-toolhub/internal/agentrun"
+	"quick-ai-toolhub/internal/app"
 	sharedconfig "quick-ai-toolhub/internal/config"
 )
 
@@ -180,30 +183,36 @@ func TestServeBootstrapsApplication(t *testing.T) {
 	root := newServeTestRepo(t)
 	t.Setenv(sharedconfig.ConfigFileEnv, filepath.Join(root, sharedconfig.DefaultFile))
 
+	orig := runServeApplication
+	t.Cleanup(func() { runServeApplication = orig })
+
+	var handler http.Handler
+	runServeApplication = func(ctx context.Context, application *app.Application) error {
+		if err := application.Bootstrap(ctx); err != nil {
+			return err
+		}
+		var err error
+		handler, err = application.HTTPHandler()
+		return err
+	}
+
 	var stdout bytes.Buffer
 	if err := run(context.Background(), []string{"serve"}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run serve: %v", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) == 0 {
-		t.Fatal("expected serve output")
+	if handler == nil {
+		t.Fatal("expected serve to configure an HTTP handler")
 	}
 
-	var payload map[string]any
-	for _, line := range lines {
-		var entry map[string]any
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			t.Fatalf("unmarshal serve output: %v\noutput=%s", err, stdout.String())
-		}
-		if entry["msg"] == "toolhub bootstrapped" {
-			payload = entry
-		}
-	}
-	if payload == nil {
-		t.Fatalf("missing bootstrap log entry in output:\n%s", stdout.String())
+	req := httptest.NewRequest(http.MethodPost, "/github/webhook", strings.NewReader(`{}`))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected webhook handler to be mounted, got status %d", recorder.Code)
 	}
 
+	payload := findServeLogEntry(t, stdout.String(), "toolhub bootstrapped")
 	components, ok := payload["components"].([]any)
 	if !ok {
 		t.Fatalf("missing components: %#v", payload["components"])
@@ -261,7 +270,7 @@ database:
   path: .toolhub/toolhub.db
 
 server:
-  listen_addr: 127.0.0.1:8080
+  listen_addr: 127.0.0.1:0
 
 default_model: gpt-5.3-codex-spark
 
@@ -301,4 +310,25 @@ func writeServeTestFile(t *testing.T, root, relativePath, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func findServeLogEntry(t *testing.T, output, msg string) map[string]any {
+	t.Helper()
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("unmarshal serve output: %v\noutput=%s", err, output)
+		}
+		if entry["msg"] == msg {
+			return entry
+		}
+	}
+
+	t.Fatalf("missing %q log entry in output:\n%s", msg, output)
+	return nil
 }

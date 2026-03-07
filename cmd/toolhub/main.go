@@ -30,6 +30,10 @@ var newRunTaskExecutor = func() runTaskExecutor {
 	return agentrun.NewExecutor(agentrun.ExecCommandRunner{})
 }
 
+var runServeApplication = func(ctx context.Context, application *app.Application) error {
+	return application.Serve(ctx)
+}
+
 type commandResponse struct {
 	OK    bool                `json:"ok"`
 	Data  *agentrun.Result    `json:"data,omitempty"`
@@ -149,7 +153,7 @@ func runServe(ctx context.Context, args []string, stdout io.Writer) error {
 		Logger: logger,
 		Config: &cfg,
 	})
-	return application.Bootstrap(ctx)
+	return runServeApplication(ctx, application)
 }
 
 func runSyncIssues(ctx context.Context, args []string, stdout io.Writer) error {

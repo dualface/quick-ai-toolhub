@@ -6,10 +6,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"time"
 
 	sharedconfig "quick-ai-toolhub/internal/config"
 	toolgit "quick-ai-toolhub/internal/git"
 	toolgithub "quick-ai-toolhub/internal/github"
+	"quick-ai-toolhub/internal/githubsync"
 	"quick-ai-toolhub/internal/leader"
 	"quick-ai-toolhub/internal/logging"
 	"quick-ai-toolhub/internal/orchestrator"
@@ -22,6 +28,7 @@ type Application struct {
 	logger       *slog.Logger
 	store        *store.Service
 	github       *toolgithub.Client
+	githubSync   *githubsync.Service
 	git          *toolgit.Client
 	timeline     *timeline.Service
 	orchestrator *orchestrator.Service
@@ -41,6 +48,11 @@ func New(opts Options) *Application {
 
 	storeService := store.New(store.Dependencies{Logger: logger})
 	githubClient := toolgithub.New(toolgithub.Dependencies{Logger: logger})
+	githubSyncService := githubsync.New(githubsync.Dependencies{
+		Logger: logger,
+		GitHub: githubClient,
+		Store:  storeService,
+	})
 	gitClient := toolgit.New(toolgit.Dependencies{Logger: logger})
 	timelineService := timeline.New(timeline.Dependencies{Logger: logger})
 	orchestratorService := orchestrator.New(orchestrator.Dependencies{
@@ -62,6 +74,7 @@ func New(opts Options) *Application {
 		logger:       logger,
 		store:        storeService,
 		github:       githubClient,
+		githubSync:   githubSyncService,
 		git:          gitClient,
 		timeline:     timelineService,
 		orchestrator: orchestratorService,
@@ -91,6 +104,73 @@ func (a *Application) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
+func (a *Application) Serve(ctx context.Context) error {
+	if err := a.Bootstrap(ctx); err != nil {
+		return err
+	}
+
+	handler, err := a.HTTPHandler()
+	if err != nil {
+		return err
+	}
+
+	listener, err := net.Listen("tcp", a.config.Server.ListenAddr)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", a.config.Server.ListenAddr, err)
+	}
+	defer func() {
+		_ = listener.Close()
+	}()
+
+	server := &http.Server{
+		Handler: handler,
+	}
+
+	serveDone := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-ctx.Done():
+		case <-serveDone:
+			return
+		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	a.logger.Info("toolhub listening", slog.String("listen_addr", listener.Addr().String()))
+	err = server.Serve(listener)
+	close(serveDone)
+	<-shutdownDone
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return nil
+	}
+	return fmt.Errorf("serve http: %w", err)
+}
+
+func (a *Application) HTTPHandler() (http.Handler, error) {
+	if a.config == nil {
+		return nil, errors.New("nil config")
+	}
+	if a.githubSync == nil {
+		return nil, errors.New("nil github sync service")
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/github/webhook", githubsync.NewWebhookHandler(a.githubSync, githubsync.ExecuteOptions{
+		WorkDir:       repoWorkDirFromConfigPath(a.config.Path),
+		Repo:          a.config.Repo.GitHubOwner + "/" + a.config.Repo.GitHubRepo,
+		DefaultBranch: a.config.Repo.DefaultBranch,
+	}))
+	return mux, nil
+}
+
 func (a *Application) ComponentNames() []string {
 	return []string{
 		a.store.Name(),
@@ -100,4 +180,17 @@ func (a *Application) ComponentNames() []string {
 		a.orchestrator.Name(),
 		a.leader.Name(),
 	}
+}
+
+func repoWorkDirFromConfigPath(configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return "."
+	}
+
+	dir := filepath.Dir(configPath)
+	if filepath.Base(dir) == "config" {
+		return filepath.Dir(dir)
+	}
+	return dir
 }
