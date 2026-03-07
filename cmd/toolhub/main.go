@@ -15,8 +15,11 @@ import (
 	"quick-ai-toolhub/internal/agentrun"
 	"quick-ai-toolhub/internal/app"
 	sharedconfig "quick-ai-toolhub/internal/config"
+	toolgithub "quick-ai-toolhub/internal/github"
+	"quick-ai-toolhub/internal/githubsync"
 	"quick-ai-toolhub/internal/issuesync"
 	"quick-ai-toolhub/internal/logging"
+	"quick-ai-toolhub/internal/store"
 )
 
 type runTaskExecutor interface {
@@ -64,6 +67,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runServe(ctx, args[1:], stdout)
 	case "sync-issues":
 		return runSyncIssues(ctx, args[1:], stdout)
+	case "github-sync", "github-sync-tool":
+		return runGitHubSync(ctx, args[1:], stdout)
 	case "run-task":
 		return runRunTask(ctx, args[1:], stdout, stderr)
 	default:
@@ -77,10 +82,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  toolhub serve")
 	fmt.Fprintln(w, "  toolhub sync-issues [flags]")
+	fmt.Fprintln(w, "  toolhub github-sync-tool <op> [flags]")
 	fmt.Fprintln(w, "  toolhub run-task <task-id> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  serve                 Bootstrap the single-process application skeleton.")
+	fmt.Fprintln(w, "  github-sync-tool      Reconcile GitHub issues / PRs / CI into SQLite projections.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "sync-issues Flags:")
 	fmt.Fprintln(w, "  --apply                 Perform GitHub writes. Default is dry-run.")
@@ -88,6 +95,13 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --tasks-dir             Path to the task brief directory.")
 	fmt.Fprintln(w, "  --manifest-file         Path to the generated manifest file.")
 	fmt.Fprintln(w, "  --workdir               Repository worktree for gh commands.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "github-sync-tool Flags:")
+	fmt.Fprintln(w, "  <op>                    full_reconcile | ingest_webhook | reconcile_issue | reconcile_pull_request | reconcile_ci_run")
+	fmt.Fprintln(w, "  (or)                    Read a JSON request from stdin when <op> is omitted.")
+	fmt.Fprintln(w, "  --reason                full_reconcile reason: startup | periodic | manual")
+	fmt.Fprintln(w, "  --config-file           Path to the repository config file. Defaults to CONFIG_FILE or config/config.yaml.")
+	fmt.Fprintln(w, "  --workdir               Repository worktree for gh commands and config discovery.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "run-task Flags:")
 	fmt.Fprintln(w, "  --agent-type            developer | qa | reviewer")
@@ -194,6 +208,165 @@ func runSyncIssues(ctx context.Context, args []string, stdout io.Writer) error {
 	return nil
 }
 
+func runGitHubSync(ctx context.Context, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("github-sync-tool", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var configFile string
+	var workdir string
+	var reason string
+	fs.StringVar(&configFile, "config-file", "", "path to repository config")
+	fs.StringVar(&workdir, "workdir", ".", "repository worktree for gh commands and config discovery")
+	fs.StringVar(&reason, "reason", "manual", "full_reconcile reason")
+
+	if err := fs.Parse(args); err != nil {
+		return writeGitHubSyncResponse(stdout, githubsync.Response{
+			OK: false,
+			Error: &githubsync.ToolError{
+				Code:      githubsync.ErrorCodeInvalid,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		})
+	}
+
+	var (
+		request githubsync.Request
+		err     error
+	)
+	switch fs.NArg() {
+	case 0:
+		request, err = readGitHubSyncRequest(os.Stdin)
+		if err != nil {
+			return writeGitHubSyncResponse(stdout, githubsync.Response{
+				OK: false,
+				Error: &githubsync.ToolError{
+					Code:      githubsync.ErrorCodeInvalid,
+					Message:   err.Error(),
+					Retryable: false,
+				},
+			})
+		}
+	case 1:
+		request = githubsync.Request{
+			Op: githubsync.Operation(fs.Arg(0)),
+		}
+	default:
+		return writeGitHubSyncResponse(stdout, githubsync.Response{
+			OK: false,
+			Error: &githubsync.ToolError{
+				Code:      githubsync.ErrorCodeInvalid,
+				Message:   "github-sync-tool accepts a single op argument",
+				Retryable: false,
+			},
+		})
+	}
+
+	if request.Op == githubsync.OpFullReconcile {
+		payload, err := json.Marshal(githubsync.FullReconcilePayload{Reason: reason})
+		if err != nil {
+			return writeGitHubSyncResponse(stdout, githubsync.Response{
+				OK: false,
+				Error: &githubsync.ToolError{
+					Code:      githubsync.ErrorCodeInternal,
+					Message:   fmt.Sprintf("marshal full_reconcile payload: %v", err),
+					Retryable: false,
+				},
+			})
+		}
+		if len(request.Payload) == 0 || string(request.Payload) == "{}" {
+			request.Payload = payload
+		}
+	} else {
+		if len(request.Payload) == 0 {
+			request.Payload = json.RawMessage(`{}`)
+		}
+	}
+
+	absWorkDir, err := filepath.Abs(workdir)
+	if err != nil {
+		return writeGitHubSyncResponse(stdout, githubsync.Response{
+			OK: false,
+			Error: &githubsync.ToolError{
+				Code:      githubsync.ErrorCodeInvalid,
+				Message:   fmt.Sprintf("resolve workdir: %v", err),
+				Retryable: false,
+			},
+		})
+	}
+
+	cfg, err := sharedconfig.Load(absWorkDir, configFile)
+	if err != nil {
+		return writeGitHubSyncResponse(stdout, githubsync.Response{
+			OK: false,
+			Error: &githubsync.ToolError{
+				Code:      githubsync.ErrorCodeInvalid,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		})
+	}
+
+	logger := logging.NewJSON(io.Discard)
+	storeService := store.New(store.Dependencies{Logger: logger})
+	defer func() {
+		_ = storeService.Close()
+	}()
+	if err := storeService.Open(ctx, store.OpenOptions{
+		ConfigPath:   cfg.Path,
+		DatabasePath: cfg.Database.Path,
+	}); err != nil {
+		return writeGitHubSyncResponse(stdout, githubsync.Response{
+			OK: false,
+			Error: &githubsync.ToolError{
+				Code:      githubsync.ErrorCodeProjection,
+				Message:   fmt.Sprintf("open store: %v", err),
+				Retryable: false,
+			},
+		})
+	}
+
+	baseStore, err := storeService.BaseStore()
+	if err != nil {
+		return writeGitHubSyncResponse(stdout, githubsync.Response{
+			OK: false,
+			Error: &githubsync.ToolError{
+				Code:      githubsync.ErrorCodeProjection,
+				Message:   fmt.Sprintf("open base store: %v", err),
+				Retryable: false,
+			},
+		})
+	}
+
+	response := githubsync.New(githubsync.Dependencies{
+		Logger: logger,
+		GitHub: toolgithub.New(toolgithub.Dependencies{Logger: logger}),
+		Store:  baseStore,
+	}).Execute(ctx, request, githubsync.ExecuteOptions{
+		WorkDir:       absWorkDir,
+		Repo:          cfg.Repo.GitHubOwner + "/" + cfg.Repo.GitHubRepo,
+		DefaultBranch: cfg.Repo.DefaultBranch,
+	})
+
+	return writeGitHubSyncResponse(stdout, response)
+}
+
+func readGitHubSyncRequest(r io.Reader) (githubsync.Request, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return githubsync.Request{}, fmt.Errorf("read github-sync-tool request: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return githubsync.Request{}, errors.New("github-sync-tool requires an op argument or a JSON request on stdin")
+	}
+
+	var request githubsync.Request
+	if err := json.Unmarshal(data, &request); err != nil {
+		return githubsync.Request{}, fmt.Errorf("decode github-sync-tool request: %w", err)
+	}
+	return request, nil
+}
+
 func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	var taskID string
 	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
@@ -286,6 +459,23 @@ func runRunTask(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 
 	return writeHumanResult(stdout, taskID, result)
+}
+
+func writeGitHubSyncResponse(stdout io.Writer, response githubsync.Response) error {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(response); err != nil {
+		return err
+	}
+	if response.OK {
+		return nil
+	}
+
+	exitCode := 1
+	if response.Error != nil && response.Error.Code == githubsync.ErrorCodeInvalid {
+		exitCode = 2
+	}
+	return &cliExitError{code: exitCode}
 }
 
 func writeErrorResponse(stdout io.Writer, toolErr *agentrun.ToolError, exitCode int, jsonOutput bool) error {

@@ -1,0 +1,451 @@
+package githubsync
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	toolgithub "quick-ai-toolhub/internal/github"
+	"quick-ai-toolhub/internal/store"
+)
+
+func TestExecuteFullReconcileProjectsGitHubState(t *testing.T) {
+	baseStore, storeService := openProjectionStore(t)
+
+	reader := fakeGitHubReader{
+		sprintIssues: []toolgithub.Issue{
+			sprintIssue(102, "Sprint-02", "GitHub task projection"),
+		},
+		openTaskIssues: []toolgithub.Issue{
+			taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool"),
+		},
+		issues: map[int]toolgithub.Issue{
+			201: taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool"),
+		},
+		subIssues: map[int][]toolgithub.IssueLink{
+			102: {
+				{GitHubIssueNumber: 201, GitHubIssueNodeID: "I_task_201", Title: "[Sprint-02][Task-01] Implement github-sync-tool"},
+			},
+		},
+		pullRequests: []toolgithub.PullRequest{
+			{
+				GitHubPRNumber:   301,
+				GitHubPRNodeID:   "PR_301",
+				Title:            "Task PR",
+				State:            "open",
+				URL:              "https://example/pr/301",
+				HeadBranch:       "task/Sprint-02/Task-01",
+				HeadSHA:          "sha-task-301",
+				BaseBranch:       "sprint/Sprint-02",
+				AutoMergeEnabled: true,
+				CreatedAt:        "2026-03-07T12:00:00Z",
+			},
+			{
+				GitHubPRNumber: 401,
+				GitHubPRNodeID: "PR_401",
+				Title:          "Sprint PR",
+				State:          "open",
+				URL:            "https://example/pr/401",
+				HeadBranch:     "sprint/Sprint-02",
+				HeadSHA:        "sha-sprint-401",
+				BaseBranch:     "main",
+				CreatedAt:      "2026-03-07T12:10:00Z",
+			},
+		},
+		workflowRuns: []toolgithub.WorkflowRun{
+			{
+				GitHubRunID:  501,
+				Name:         "CI",
+				WorkflowName: "CI",
+				HeadBranch:   "task/Sprint-02/Task-01",
+				HeadSHA:      "sha-task-301",
+				Status:       "completed",
+				Conclusion:   "success",
+				URL:          "https://example/run/501",
+				StartedAt:    "2026-03-07T12:01:00Z",
+				UpdatedAt:    "2026-03-07T12:05:00Z",
+			},
+			{
+				GitHubRunID:  601,
+				Name:         "CI",
+				WorkflowName: "CI",
+				HeadBranch:   "sprint/Sprint-02",
+				HeadSHA:      "sha-sprint-401",
+				Status:       "completed",
+				Conclusion:   "success",
+				URL:          "https://example/run/601",
+				StartedAt:    "2026-03-07T12:11:00Z",
+				UpdatedAt:    "2026-03-07T12:15:00Z",
+			},
+		},
+	}
+
+	response := New(Dependencies{
+		GitHub: reader,
+		Store:  baseStore,
+	}).Execute(context.Background(), Request{
+		Op:      OpFullReconcile,
+		Payload: mustJSON(t, FullReconcilePayload{Reason: "manual"}),
+	}, ExecuteOptions{
+		WorkDir:       t.TempDir(),
+		Repo:          "acme/quick-ai-toolhub",
+		DefaultBranch: "main",
+	})
+	if !response.OK {
+		t.Fatalf("expected full_reconcile to succeed, got %#v", response.Error)
+	}
+	if response.Data == nil {
+		t.Fatal("expected response data")
+	}
+	if response.Data.SyncSummary.ChangedCount != 6 {
+		t.Fatalf("expected 6 changed entities, got %d", response.Data.SyncSummary.ChangedCount)
+	}
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+
+	assertCount(t, db, `SELECT COUNT(*) FROM sprints`, 1)
+	assertCount(t, db, `SELECT COUNT(*) FROM tasks`, 1)
+	assertCount(t, db, `SELECT COUNT(*) FROM pull_requests`, 2)
+	assertCount(t, db, `SELECT COUNT(*) FROM ci_runs`, 2)
+	assertCount(t, db, `SELECT COUNT(*) FROM sync_state WHERE name = 'last_full_reconcile_at'`, 1)
+
+	var activePR sql.NullInt64
+	if err := db.QueryRowContext(context.Background(), `
+		SELECT active_pr_number FROM tasks WHERE task_id = ?
+	`, "Sprint-02/Task-01").Scan(&activePR); err != nil {
+		t.Fatalf("load active_pr_number: %v", err)
+	}
+	if !activePR.Valid || activePR.Int64 != 301 {
+		t.Fatalf("expected active_pr_number=301, got %+v", activePR)
+	}
+}
+
+func TestExecuteFullReconcileRejectsOrphanTaskIssues(t *testing.T) {
+	baseStore, _ := openProjectionStore(t)
+
+	response := New(Dependencies{
+		GitHub: fakeGitHubReader{
+			sprintIssues: []toolgithub.Issue{
+				sprintIssue(102, "Sprint-02", "GitHub task projection"),
+			},
+			openTaskIssues: []toolgithub.Issue{
+				taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool"),
+				taskIssue(202, "Sprint-02", "Task-02", "Orphan task"),
+			},
+			issues: map[int]toolgithub.Issue{
+				201: taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool"),
+			},
+			subIssues: map[int][]toolgithub.IssueLink{
+				102: {
+					{GitHubIssueNumber: 201, GitHubIssueNodeID: "I_task_201", Title: "[Sprint-02][Task-01] Implement github-sync-tool"},
+				},
+			},
+		},
+		Store: baseStore,
+	}).Execute(context.Background(), Request{
+		Op:      OpFullReconcile,
+		Payload: mustJSON(t, FullReconcilePayload{Reason: "manual"}),
+	}, ExecuteOptions{
+		WorkDir:       t.TempDir(),
+		Repo:          "acme/quick-ai-toolhub",
+		DefaultBranch: "main",
+	})
+
+	if response.OK {
+		t.Fatal("expected orphan task validation to fail")
+	}
+	if response.Error == nil || response.Error.Code != ErrorCodeGitHubData {
+		t.Fatalf("expected github_data_invalid error, got %#v", response.Error)
+	}
+	if !strings.Contains(response.Error.Message, "orphaned") {
+		t.Fatalf("expected orphaned task message, got %q", response.Error.Message)
+	}
+}
+
+func TestExecuteFullReconcileRejectsCrossSprintDependencies(t *testing.T) {
+	baseStore, _ := openProjectionStore(t)
+
+	response := New(Dependencies{
+		GitHub: fakeGitHubReader{
+			sprintIssues: []toolgithub.Issue{
+				sprintIssue(102, "Sprint-02", "GitHub task projection"),
+				sprintIssue(103, "Sprint-03", "Follow-up"),
+			},
+			openTaskIssues: []toolgithub.Issue{
+				taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool"),
+				taskIssue(301, "Sprint-03", "Task-01", "Follow-up task"),
+			},
+			issues: map[int]toolgithub.Issue{
+				201: taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool"),
+				301: taskIssue(301, "Sprint-03", "Task-01", "Follow-up task"),
+			},
+			subIssues: map[int][]toolgithub.IssueLink{
+				102: {
+					{GitHubIssueNumber: 201, GitHubIssueNodeID: "I_task_201", Title: "[Sprint-02][Task-01] Implement github-sync-tool"},
+				},
+				103: {
+					{GitHubIssueNumber: 301, GitHubIssueNodeID: "I_task_301", Title: "[Sprint-03][Task-01] Follow-up task"},
+				},
+			},
+			dependencies: map[int][]toolgithub.IssueLink{
+				201: {
+					{GitHubIssueNumber: 301, GitHubIssueNodeID: "I_task_301", Title: "[Sprint-03][Task-01] Follow-up task"},
+				},
+			},
+		},
+		Store: baseStore,
+	}).Execute(context.Background(), Request{
+		Op:      OpFullReconcile,
+		Payload: mustJSON(t, FullReconcilePayload{Reason: "manual"}),
+	}, ExecuteOptions{
+		WorkDir:       t.TempDir(),
+		Repo:          "acme/quick-ai-toolhub",
+		DefaultBranch: "main",
+	})
+
+	if response.OK {
+		t.Fatal("expected cross-sprint dependency validation to fail")
+	}
+	if response.Error == nil || response.Error.Code != ErrorCodeGitHubData {
+		t.Fatalf("expected github_data_invalid error, got %#v", response.Error)
+	}
+	if !strings.Contains(response.Error.Message, "cross-sprint dependency") {
+		t.Fatalf("expected cross-sprint dependency message, got %q", response.Error.Message)
+	}
+}
+
+func TestExecuteFullReconcileRejectsTaskNumberMismatch(t *testing.T) {
+	baseStore, _ := openProjectionStore(t)
+
+	mismatched := taskIssue(201, "Sprint-02", "Task-01", "Implement github-sync-tool")
+	mismatched.Body = taskBody("Sprint-02", "Task-02", "Implement github-sync-tool")
+
+	response := New(Dependencies{
+		GitHub: fakeGitHubReader{
+			sprintIssues: []toolgithub.Issue{
+				sprintIssue(102, "Sprint-02", "GitHub task projection"),
+			},
+			openTaskIssues: []toolgithub.Issue{mismatched},
+			issues: map[int]toolgithub.Issue{
+				201: mismatched,
+			},
+			subIssues: map[int][]toolgithub.IssueLink{
+				102: {
+					{GitHubIssueNumber: 201, GitHubIssueNodeID: "I_task_201", Title: mismatched.Title},
+				},
+			},
+		},
+		Store: baseStore,
+	}).Execute(context.Background(), Request{
+		Op:      OpFullReconcile,
+		Payload: mustJSON(t, FullReconcilePayload{Reason: "manual"}),
+	}, ExecuteOptions{
+		WorkDir:       t.TempDir(),
+		Repo:          "acme/quick-ai-toolhub",
+		DefaultBranch: "main",
+	})
+
+	if response.OK {
+		t.Fatal("expected task numbering validation to fail")
+	}
+	if response.Error == nil || response.Error.Code != ErrorCodeGitHubData {
+		t.Fatalf("expected github_data_invalid error, got %#v", response.Error)
+	}
+	if !strings.Contains(response.Error.Message, "mismatched task id") {
+		t.Fatalf("expected mismatched task id message, got %q", response.Error.Message)
+	}
+}
+
+type fakeGitHubReader struct {
+	sprintIssues   []toolgithub.Issue
+	openTaskIssues []toolgithub.Issue
+	issues         map[int]toolgithub.Issue
+	subIssues      map[int][]toolgithub.IssueLink
+	dependencies   map[int][]toolgithub.IssueLink
+	pullRequests   []toolgithub.PullRequest
+	workflowRuns   []toolgithub.WorkflowRun
+}
+
+func (f fakeGitHubReader) ListSprintIssues(context.Context, toolgithub.ListSprintIssuesRequest) ([]toolgithub.Issue, error) {
+	return append([]toolgithub.Issue(nil), f.sprintIssues...), nil
+}
+
+func (f fakeGitHubReader) ListIssues(context.Context, toolgithub.ListIssuesRequest) ([]toolgithub.Issue, error) {
+	return append([]toolgithub.Issue(nil), f.openTaskIssues...), nil
+}
+
+func (f fakeGitHubReader) GetIssue(_ context.Context, req toolgithub.GetIssueRequest) (toolgithub.Issue, error) {
+	issue, ok := f.issues[req.GitHubIssueNumber]
+	if !ok {
+		return toolgithub.Issue{}, sql.ErrNoRows
+	}
+	return issue, nil
+}
+
+func (f fakeGitHubReader) ListSubIssues(_ context.Context, req toolgithub.ListSubIssuesRequest) ([]toolgithub.IssueLink, error) {
+	return append([]toolgithub.IssueLink(nil), f.subIssues[req.ParentIssueNumber]...), nil
+}
+
+func (f fakeGitHubReader) ListIssueDependencies(_ context.Context, req toolgithub.ListIssueDependenciesRequest) ([]toolgithub.IssueLink, error) {
+	return append([]toolgithub.IssueLink(nil), f.dependencies[req.GitHubIssueNumber]...), nil
+}
+
+func (f fakeGitHubReader) ListPullRequests(context.Context, toolgithub.ListPullRequestsRequest) ([]toolgithub.PullRequest, error) {
+	return append([]toolgithub.PullRequest(nil), f.pullRequests...), nil
+}
+
+func (f fakeGitHubReader) ListWorkflowRuns(context.Context, toolgithub.ListWorkflowRunsRequest) ([]toolgithub.WorkflowRun, error) {
+	return append([]toolgithub.WorkflowRun(nil), f.workflowRuns...), nil
+}
+
+func sprintIssue(number int, sprintID, title string) toolgithub.Issue {
+	return toolgithub.Issue{
+		GitHubIssueNumber: number,
+		GitHubIssueNodeID: "I_sprint_" + sprintID,
+		Title:             "[" + sprintID + "] " + title,
+		Body: strings.TrimSpace(`
+## Sprint ID
+
+` + sprintID + `
+
+## Goal
+
+Project GitHub state into SQLite.
+
+## Done When
+
+- SQLite projections refresh.
+`),
+		State:     "open",
+		Labels:    []string{"kind/sprint"},
+		CreatedAt: "2026-03-07T00:00:00Z",
+		UpdatedAt: "2026-03-07T01:00:00Z",
+	}
+}
+
+func taskIssue(number int, sprintID, taskID, title string) toolgithub.Issue {
+	return toolgithub.Issue{
+		GitHubIssueNumber: number,
+		GitHubIssueNodeID: "I_task_" + taskID,
+		Title:             "[" + sprintID + "][" + taskID + "] " + title,
+		Body:              taskBody(sprintID, taskID, title),
+		State:             "open",
+		Labels:            []string{"kind/task"},
+		CreatedAt:         "2026-03-07T00:00:00Z",
+		UpdatedAt:         "2026-03-07T01:00:00Z",
+	}
+}
+
+func taskBody(sprintID, taskID, title string) string {
+	return strings.TrimSpace(`
+## Sprint ID
+
+` + sprintID + `
+
+## Task ID
+
+` + taskID + `
+
+## Goal
+
+` + title + `
+
+## Acceptance Criteria
+
+- Projection row exists.
+
+## Out of Scope
+
+- Webhook sync.
+`)
+}
+
+func openProjectionStore(t *testing.T) (store.BaseStore, *store.Service) {
+	t.Helper()
+
+	root := t.TempDir()
+	writeProjectionTestFile(t, root, filepath.Join("config", "config.yaml"), "store: test\n")
+	writeProjectionTestFile(t, root, filepath.Join("sql", "schema.sql"), loadProjectionSchema(t))
+
+	service := store.New(store.Dependencies{})
+	t.Cleanup(func() {
+		if err := service.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	})
+
+	if err := service.Open(context.Background(), store.OpenOptions{
+		ConfigPath:   filepath.Join(root, "config", "config.yaml"),
+		DatabasePath: ".toolhub/toolhub.db",
+	}); err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	base, err := service.BaseStore()
+	if err != nil {
+		t.Fatalf("base store: %v", err)
+	}
+	return base, service
+}
+
+func loadProjectionSchema(t *testing.T) string {
+	t.Helper()
+
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test file path")
+	}
+
+	path := filepath.Join(filepath.Dir(file), "..", "..", "sql", "schema.sql")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	return string(data)
+}
+
+func writeProjectionTestFile(t *testing.T, root, relativePath, content string) {
+	t.Helper()
+
+	path := filepath.Join(root, relativePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func mustJSON(t *testing.T, value any) json.RawMessage {
+	t.Helper()
+
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	return data
+}
+
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func assertCount(t *testing.T, db rowQuerier, query string, want int) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(context.Background(), query).Scan(&got); err != nil {
+		t.Fatalf("query count %q: %v", query, err)
+	}
+	if got != want {
+		t.Fatalf("query %q returned %d rows, want %d", query, got, want)
+	}
+}

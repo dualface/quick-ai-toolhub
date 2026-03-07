@@ -169,7 +169,7 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"toolhub serve", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--no-progress"} {
+	for _, needle := range []string{"toolhub serve", "github-sync-tool", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}
