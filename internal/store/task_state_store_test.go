@@ -153,6 +153,61 @@ func TestTaskStateStoreUpdateTaskStateOnlyTouchesProvidedFields(t *testing.T) {
 	}
 }
 
+func TestTaskStateStoreUpdateTaskStateClearsOptionalStringFieldsWhenBlank(t *testing.T) {
+	base, service := openTestBaseStore(t)
+	insertSprintRow(t, service, sprintSeed{
+		SprintID:          "Sprint-01",
+		SequenceNo:        1,
+		GitHubIssueNumber: 101,
+		Status:            "in_progress",
+	})
+	insertTaskRow(t, service, taskSeed{
+		TaskID:                    "Sprint-01/Task-04",
+		SprintID:                  "Sprint-01",
+		TaskLocalID:               "Task-04",
+		SequenceNo:                4,
+		GitHubIssueNumber:         201,
+		ParentGitHubIssueNumber:   101,
+		Status:                    "review_in_progress",
+		AttemptTotal:              2,
+		CurrentFailureFingerprint: stringPtr("fp-1"),
+		NeedsHuman:                true,
+		HumanReason:               stringPtr("manual check"),
+	})
+
+	updatedProjection, err := base.UpdateTaskState(context.Background(), UpdateTaskStatePayload{
+		TaskID:                    "Sprint-01/Task-04",
+		Status:                    "pr_open",
+		CurrentFailureFingerprint: stringPtr(""),
+		NeedsHuman:                boolPtr(false),
+		HumanReason:               stringPtr(""),
+	})
+	if err != nil {
+		t.Fatalf("update task state: %v", err)
+	}
+
+	if updatedProjection.Status != "pr_open" {
+		t.Fatalf("unexpected status: %s", updatedProjection.Status)
+	}
+	if updatedProjection.NeedsHuman {
+		t.Fatalf("expected needs_human to clear, got %+v", updatedProjection)
+	}
+	if updatedProjection.HumanReason != nil {
+		t.Fatalf("expected human_reason to clear, got %#v", updatedProjection.HumanReason)
+	}
+
+	row := loadTaskStateColumns(t, service, "Sprint-01/Task-04")
+	if row.CurrentFailureFingerprint != nil {
+		t.Fatalf("expected current_failure_fingerprint to clear, got %#v", row.CurrentFailureFingerprint)
+	}
+	if row.NeedsHuman {
+		t.Fatalf("expected row needs_human to clear, got %+v", row)
+	}
+	if row.HumanReason != nil {
+		t.Fatalf("expected row human_reason to clear, got %#v", row.HumanReason)
+	}
+}
+
 func TestTaskStateStoreUpdateSprintStateOnlyTouchesProvidedFields(t *testing.T) {
 	base, service := openTestBaseStore(t)
 	insertSprintRow(t, service, sprintSeed{
@@ -566,6 +621,8 @@ type taskStateColumns struct {
 	ReviewFailCount           int
 	CIFailCount               int
 	CurrentFailureFingerprint *string
+	NeedsHuman                bool
+	HumanReason               *string
 }
 
 func loadTaskStateColumns(t *testing.T, service *Service, taskID string) taskStateColumns {
@@ -579,7 +636,7 @@ func loadTaskStateColumns(t *testing.T, service *Service, taskID string) taskSta
 	var row taskStateColumns
 	if err := db.QueryRowContext(
 		context.Background(),
-		`SELECT attempt_total, qa_fail_count, review_fail_count, ci_fail_count, current_failure_fingerprint
+		`SELECT attempt_total, qa_fail_count, review_fail_count, ci_fail_count, current_failure_fingerprint, needs_human, human_reason
 		FROM tasks WHERE task_id = ?`,
 		taskID,
 	).Scan(
@@ -588,6 +645,8 @@ func loadTaskStateColumns(t *testing.T, service *Service, taskID string) taskSta
 		&row.ReviewFailCount,
 		&row.CIFailCount,
 		&row.CurrentFailureFingerprint,
+		&row.NeedsHuman,
+		&row.HumanReason,
 	); err != nil {
 		t.Fatalf("load task state columns: %v", err)
 	}
@@ -628,6 +687,10 @@ func boolToInt(value bool) int {
 }
 
 func stringPtr(value string) *string {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
 	return &value
 }
 

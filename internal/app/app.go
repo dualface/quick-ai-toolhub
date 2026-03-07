@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"quick-ai-toolhub/internal/agentrun"
 	sharedconfig "quick-ai-toolhub/internal/config"
 	toolgit "quick-ai-toolhub/internal/git"
 	toolgithub "quick-ai-toolhub/internal/github"
@@ -66,12 +67,14 @@ func New(opts Options) *Application {
 		Git:    gitClient,
 	})
 	timelineService := timeline.New(timeline.Dependencies{Logger: logger})
+	agentRunner := agentrun.NewExecutor(agentrun.ExecCommandRunner{})
 	orchestratorService := orchestrator.New(orchestrator.Dependencies{
-		Logger:   logger,
-		Store:    storeService,
-		GitHub:   githubClient,
-		Git:      gitClient,
-		Timeline: timelineService,
+		Logger:      logger,
+		Store:       storeService,
+		GitHub:      githubClient,
+		Git:         gitClient,
+		Timeline:    timelineService,
+		AgentRunner: agentRunner,
 	})
 	leaderService := leader.New(leader.Dependencies{
 		Logger:       logger,

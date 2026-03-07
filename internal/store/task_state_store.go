@@ -540,22 +540,22 @@ func (s BaseStore) UpdateTaskState(ctx context.Context, payload UpdateTaskStateP
 		update.Set("ci_fail_count = ?", *payload.CIFailCount)
 	}
 	if payload.CurrentFailureFingerprint != nil {
-		update.Set("current_failure_fingerprint = ?", *payload.CurrentFailureFingerprint)
+		update.Set("current_failure_fingerprint = ?", normalizeOptionalString(payload.CurrentFailureFingerprint))
 	}
 	if payload.ActivePRNumber != nil {
 		update.Set("active_pr_number = ?", *payload.ActivePRNumber)
 	}
 	if payload.TaskBranch != nil {
-		update.Set("task_branch = ?", *payload.TaskBranch)
+		update.Set("task_branch = ?", normalizeOptionalString(payload.TaskBranch))
 	}
 	if payload.WorktreePath != nil {
-		update.Set("worktree_path = ?", *payload.WorktreePath)
+		update.Set("worktree_path = ?", normalizeOptionalString(payload.WorktreePath))
 	}
 	if payload.NeedsHuman != nil {
 		update.Set("needs_human = ?", *payload.NeedsHuman)
 	}
 	if payload.HumanReason != nil {
-		update.Set("human_reason = ?", *payload.HumanReason)
+		update.Set("human_reason = ?", normalizeOptionalString(payload.HumanReason))
 	}
 
 	result, err := update.Exec(ctx)
