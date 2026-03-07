@@ -139,6 +139,8 @@ func defaultRoleInstructions(agentType AgentType) string {
 	case AgentDeveloper:
 		return strings.Join([]string{
 			"- Implement the task end-to-end within scope.",
+			"- If execution context includes a QA report or log, read the latest QA findings before making changes.",
+			"- Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
 			"- Run the smallest relevant validation before finishing.",
 		}, "\n")
 	case AgentQA:

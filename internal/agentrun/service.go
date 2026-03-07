@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +66,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return Result{}, err
 	}
 	applyDefaultContextRefs(&opts, sprint)
+	applyLatestQAContextRefs(&opts, outputRoot)
 
 	settings, err := loadAgentSettings(opts.WorkDir, opts.ConfigFile)
 	if err != nil {
@@ -290,6 +292,96 @@ func applyDefaultContextRefs(opts *RunOptions, sprint *issuesync.Sprint) {
 	if opts.ContextRefs.ArtifactRefs.Worktree == "" {
 		opts.ContextRefs.ArtifactRefs.Worktree = "."
 	}
+}
+
+func applyLatestQAContextRefs(opts *RunOptions, outputRoot string) {
+	if opts.AgentType != AgentDeveloper {
+		return
+	}
+	if hasExplicitArtifactContext(opts.ContextRefs.ArtifactRefs) {
+		return
+	}
+
+	refs, ok := findLatestAgentRunArtifactRefs(opts.WorkDir, outputRoot, opts.TaskID, AgentQA)
+	if !ok {
+		return
+	}
+	if opts.ContextRefs.ArtifactRefs.Log == "" {
+		opts.ContextRefs.ArtifactRefs.Log = refs.Log
+	}
+	if opts.ContextRefs.ArtifactRefs.Patch == "" {
+		opts.ContextRefs.ArtifactRefs.Patch = refs.Patch
+	}
+	if opts.ContextRefs.ArtifactRefs.Report == "" {
+		opts.ContextRefs.ArtifactRefs.Report = refs.Report
+	}
+}
+
+func hasExplicitArtifactContext(refs ArtifactRefs) bool {
+	return strings.TrimSpace(refs.Log) != "" ||
+		strings.TrimSpace(refs.Patch) != "" ||
+		strings.TrimSpace(refs.Report) != ""
+}
+
+func findLatestAgentRunArtifactRefs(workdir, outputRoot, taskID string, agentType AgentType) (ArtifactRefs, bool) {
+	attemptDirs, err := filepath.Glob(filepath.Join(outputRoot, filepath.FromSlash(taskID), sanitizePathSegment(string(agentType)), "attempt-*"))
+	if err != nil {
+		return ArtifactRefs{}, false
+	}
+
+	bestAttempt := -1
+	bestRunLeaf := ""
+	bestReportPath := ""
+	for _, attemptDir := range attemptDirs {
+		attempt, ok := parseAttemptDirName(filepath.Base(attemptDir))
+		if !ok {
+			continue
+		}
+
+		reportPaths, err := filepath.Glob(filepath.Join(attemptDir, "*", "*", "result.json"))
+		if err != nil {
+			continue
+		}
+		for _, reportPath := range reportPaths {
+			info, err := os.Stat(reportPath)
+			if err != nil || info.IsDir() {
+				continue
+			}
+
+			runLeaf := filepath.Base(filepath.Dir(reportPath))
+			if attempt > bestAttempt || (attempt == bestAttempt && runLeaf > bestRunLeaf) {
+				bestAttempt = attempt
+				bestRunLeaf = runLeaf
+				bestReportPath = reportPath
+			}
+		}
+	}
+
+	if bestReportPath == "" {
+		return ArtifactRefs{}, false
+	}
+
+	refs := ArtifactRefs{
+		Report: relOrAbs(workdir, bestReportPath),
+	}
+	logPath := filepath.Join(filepath.Dir(bestReportPath), "runner.log")
+	if info, err := os.Stat(logPath); err == nil && !info.IsDir() {
+		refs.Log = relOrAbs(workdir, logPath)
+	}
+	return refs, true
+}
+
+func parseAttemptDirName(name string) (int, bool) {
+	value := strings.TrimPrefix(strings.TrimSpace(name), "attempt-")
+	if value == "" || value == name {
+		return 0, false
+	}
+
+	attempt, err := strconv.Atoi(value)
+	if err != nil || attempt <= 0 {
+		return 0, false
+	}
+	return attempt, true
 }
 
 func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (CommandRequest, error) {

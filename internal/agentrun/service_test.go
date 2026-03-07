@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,88 @@ func TestRunTaskExplicitModelOverridesConfig(t *testing.T) {
 		TasksDir:  filepath.Join(repo, "plan/tasks"),
 		WorkDir:   repo,
 		Model:     "gpt-5-codex-override",
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+}
+
+func TestRunTaskDeveloperUsesLatestQAArtifactsAsContext(t *testing.T) {
+	repo := setupTestRepo(t)
+	oldReport, oldLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 2, "default", "20260306T115900.000000000Z-oldrun")
+	newReport, newLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 10, "default", "20260306T120000.000000000Z-newrun")
+
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			prompt := string(req.Stdin)
+			if !strings.Contains(prompt, "- report: "+newReport) {
+				t.Fatalf("expected latest QA report in prompt, got:\n%s", prompt)
+			}
+			if !strings.Contains(prompt, "- log: "+newLog) {
+				t.Fatalf("expected latest QA log in prompt, got:\n%s", prompt)
+			}
+			if strings.Contains(prompt, oldReport) || strings.Contains(prompt, oldLog) {
+				t.Fatalf("expected older QA artifacts to be ignored, got:\n%s", prompt)
+			}
+			if !strings.Contains(prompt, "Fix the concrete problems called out by that latest QA round before doing any follow-on work.") {
+				t.Fatalf("expected QA repair instruction in prompt, got:\n%s", prompt)
+			}
+
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			if err := os.WriteFile(lastMessagePath, []byte(`{"status":"success","summary":"ok","next_action":"done","failure_fingerprint":null,"artifact_refs":null,"findings":null}`), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	_, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+}
+
+func TestRunTaskDeveloperSkipsAutoQAArtifactsWhenExplicitContextProvided(t *testing.T) {
+	repo := setupTestRepo(t)
+	autoReport, autoLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 3, "default", "20260306T120000.000000000Z-qarun")
+
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			prompt := string(req.Stdin)
+			if !strings.Contains(prompt, "- report: manual/report.json") {
+				t.Fatalf("expected explicit report in prompt, got:\n%s", prompt)
+			}
+			if strings.Contains(prompt, autoReport) || strings.Contains(prompt, autoLog) {
+				t.Fatalf("expected auto QA artifacts to stay disabled when explicit context is provided, got:\n%s", prompt)
+			}
+
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			if err := os.WriteFile(lastMessagePath, []byte(`{"status":"success","summary":"ok","next_action":"done","failure_fingerprint":null,"artifact_refs":null,"findings":null}`), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	_, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+		ContextRefs: ContextRefs{
+			ArtifactRefs: ArtifactRefs{
+				Report: "manual/report.json",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("run task: %v", err)
@@ -667,6 +750,8 @@ agents:
 `)+"\n")
 	mustWriteFile(t, filepath.Join(root, "prompts/agents/developer.md"), strings.TrimSpace(`
 - Implement the task end-to-end within scope.
+- If execution context includes a QA report or log, read the latest QA findings before making changes.
+- Fix the concrete problems called out by that latest QA round before doing any follow-on work.
 - Run the smallest relevant validation before finishing.
 - Finish {{.TaskID}} in scope.
 `)+"\n")
@@ -849,6 +934,51 @@ func TestBuildPromptQAIncludesValidationRules(t *testing.T) {
 			t.Fatalf("missing %q in prompt:\n%s", needle, prompt)
 		}
 	}
+}
+
+func TestBuildPromptDeveloperIncludesQARepairRules(t *testing.T) {
+	task := &issuesync.TaskBrief{
+		TaskID: "Sprint-04/Task-01",
+		Goal:   "Goal",
+		Source: "/repo/plan/tasks/Sprint-04/Task-01.md",
+	}
+	sprint := &issuesync.Sprint{ID: "Sprint-04", Goal: "Sprint Goal"}
+	prompt := buildPrompt(AgentDeveloper, task, sprint, 2, "", ContextRefs{
+		SprintID:     "Sprint-04",
+		WorktreePath: "/repo",
+		ArtifactRefs: ArtifactRefs{
+			Report: ".toolhub/runs/Sprint-04/Task-01/qa/attempt-02/default/run/result.json",
+		},
+	}, "/repo", "")
+
+	for _, needle := range []string{
+		"If execution context includes a QA report or log, read the latest QA findings before making changes.",
+		"Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Fatalf("missing %q in prompt:\n%s", needle, prompt)
+		}
+	}
+}
+
+func writeHistoricalRunArtifacts(t *testing.T, repo, taskID string, agentType AgentType, attempt int, lens, runLeaf string) (string, string) {
+	t.Helper()
+
+	runDir := filepath.Join(
+		repo,
+		".toolhub",
+		"runs",
+		filepath.FromSlash(taskID),
+		string(agentType),
+		fmt.Sprintf("attempt-%02d", attempt),
+		lens,
+		runLeaf,
+	)
+	reportPath := filepath.Join(runDir, "result.json")
+	logPath := filepath.Join(runDir, "runner.log")
+	mustWriteFile(t, reportPath, `{"status":"pass"}`+"\n")
+	mustWriteFile(t, logPath, "runner log\n")
+	return filepath.ToSlash(strings.TrimPrefix(reportPath, repo+string(os.PathSeparator))), filepath.ToSlash(strings.TrimPrefix(logPath, repo+string(os.PathSeparator)))
 }
 
 func TestRenderRoleTemplateUsesTaskAndSprintContext(t *testing.T) {
