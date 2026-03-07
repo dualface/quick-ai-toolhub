@@ -22,6 +22,7 @@ import (
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/tasklist"
 	"quick-ai-toolhub/internal/timeline"
+	"quick-ai-toolhub/internal/worktreeprep"
 )
 
 type Application struct {
@@ -31,6 +32,7 @@ type Application struct {
 	github       *toolgithub.Client
 	githubSync   *githubsync.Service
 	git          *toolgit.Client
+	worktreePrep *worktreeprep.Service
 	timeline     *timeline.Service
 	orchestrator *orchestrator.Service
 	leader       *leader.Service
@@ -59,6 +61,10 @@ func New(opts Options) *Application {
 		Store:  taskListStoreAdapter{service: storeService},
 	})
 	gitClient := toolgit.New(toolgit.Dependencies{Logger: logger})
+	worktreePrepService := worktreeprep.New(worktreeprep.Dependencies{
+		Logger: logger,
+		Git:    gitClient,
+	})
 	timelineService := timeline.New(timeline.Dependencies{Logger: logger})
 	orchestratorService := orchestrator.New(orchestrator.Dependencies{
 		Logger:   logger,
@@ -71,6 +77,7 @@ func New(opts Options) *Application {
 		Logger:       logger,
 		Store:        storeService,
 		TaskList:     taskListService,
+		WorktreePrep: worktreePrepService,
 		Orchestrator: orchestratorService,
 		Timeline:     timelineService,
 	})
@@ -82,6 +89,7 @@ func New(opts Options) *Application {
 		github:       githubClient,
 		githubSync:   githubSyncService,
 		git:          gitClient,
+		worktreePrep: worktreePrepService,
 		timeline:     timelineService,
 		orchestrator: orchestratorService,
 		leader:       leaderService,
@@ -182,6 +190,7 @@ func (a *Application) ComponentNames() []string {
 		a.store.Name(),
 		a.github.Name(),
 		a.git.Name(),
+		a.worktreePrep.Name(),
 		a.timeline.Name(),
 		a.orchestrator.Name(),
 		a.leader.Name(),

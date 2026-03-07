@@ -6,6 +6,7 @@ import (
 
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/tasklist"
+	"quick-ai-toolhub/internal/worktreeprep"
 )
 
 func TestSelectNextSprintChoosesEarliestNonTerminalSprint(t *testing.T) {
@@ -193,9 +194,103 @@ func TestSelectNextWorkItemReturnsExplicitNoSprintWhenAllProjectedSprintsAreTerm
 	}
 }
 
+func TestPrepareNextWorkItemUsesSelectedSprintAndTaskBranches(t *testing.T) {
+	tool := &fakeTaskListTool{
+		responses: map[string]tasklist.Response{
+			responseKey(tasklist.Request{RefreshMode: tasklist.RefreshModeFull}): successResponse(tasklist.ResponseData{
+				Sprints: []store.SprintProjection{
+					{SprintID: "Sprint-03", SequenceNo: 3, Status: "todo"},
+				},
+			}),
+			responseKey(tasklist.Request{
+				RefreshMode: tasklist.RefreshModeTargeted,
+				SprintID:    "Sprint-03",
+			}): successResponse(tasklist.ResponseData{
+				Tasks: []tasklist.TaskEntry{
+					{
+						Task: store.TaskProjection{
+							TaskID:      "Sprint-03/Task-03",
+							SprintID:    "Sprint-03",
+							TaskLocalID: "Task-03",
+							SequenceNo:  3,
+							Status:      "todo",
+						},
+					},
+				},
+			}),
+		},
+	}
+	worktreeTool := &fakeWorktreePrepTool{
+		response: worktreeprep.Response{
+			OK: true,
+			Data: &worktreeprep.ResponseData{
+				WorktreePath:  "/tmp/worktrees/Sprint-03/Task-03",
+				TaskBranch:    "task/Sprint-03/Task-03",
+				BaseBranch:    "sprint/Sprint-03",
+				BaseCommitSHA: "abc123",
+				Reused:        true,
+			},
+		},
+	}
+
+	service := New(Dependencies{
+		TaskList:     tool,
+		WorktreePrep: worktreeTool,
+	})
+
+	result, err := service.PrepareNextWorkItem(context.Background(), PrepareNextWorkItemOptions{
+		WorkDir:       "/repo",
+		DefaultBranch: "main",
+		WorktreeRoot:  "/tmp/worktrees",
+		Remote:        "origin",
+	})
+	if err != nil {
+		t.Fatalf("prepare next work item: %v", err)
+	}
+	if result.Status != SelectionStatusSelected {
+		t.Fatalf("expected selected status, got %s", result.Status)
+	}
+	if result.Sprint == nil || result.Sprint.SprintID != "Sprint-03" {
+		t.Fatalf("unexpected sprint: %+v", result.Sprint)
+	}
+	if result.Task == nil || result.Task.TaskID != "Sprint-03/Task-03" {
+		t.Fatalf("unexpected task: %+v", result.Task)
+	}
+	if result.Worktree == nil || result.Worktree.BaseCommitSHA != "abc123" {
+		t.Fatalf("unexpected worktree payload: %+v", result.Worktree)
+	}
+	if len(worktreeTool.calls) != 1 {
+		t.Fatalf("expected a single worktree tool call, got %+v", worktreeTool.calls)
+	}
+
+	call := worktreeTool.calls[0]
+	if call.request.SprintBranch != "sprint/Sprint-03" {
+		t.Fatalf("unexpected sprint branch: %s", call.request.SprintBranch)
+	}
+	if call.request.TaskBranch != "task/Sprint-03/Task-03" {
+		t.Fatalf("unexpected task branch: %s", call.request.TaskBranch)
+	}
+	if call.request.WorktreeRoot != "/tmp/worktrees" {
+		t.Fatalf("unexpected worktree root: %s", call.request.WorktreeRoot)
+	}
+	if call.options.WorkDir != "/repo" || call.options.DefaultBranch != "main" || call.options.Remote != "origin" {
+		t.Fatalf("unexpected execute options: %+v", call.options)
+	}
+}
+
 type fakeTaskListTool struct {
 	responses map[string]tasklist.Response
 	calls     []tasklist.Request
+}
+
+type fakeWorktreePrepTool struct {
+	response worktreeprep.Response
+	calls    []fakeWorktreePrepCall
+}
+
+type fakeWorktreePrepCall struct {
+	request worktreeprep.Request
+	options worktreeprep.ExecuteOptions
 }
 
 func (f *fakeTaskListTool) Execute(_ context.Context, req tasklist.Request) tasklist.Response {
@@ -212,6 +307,14 @@ func (f *fakeTaskListTool) Execute(_ context.Context, req tasklist.Request) task
 		}
 	}
 	return response
+}
+
+func (f *fakeWorktreePrepTool) Execute(_ context.Context, req worktreeprep.Request, opts worktreeprep.ExecuteOptions) worktreeprep.Response {
+	f.calls = append(f.calls, fakeWorktreePrepCall{
+		request: req,
+		options: opts,
+	})
+	return f.response
 }
 
 func successResponse(data tasklist.ResponseData) tasklist.Response {

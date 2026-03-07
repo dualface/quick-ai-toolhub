@@ -8,12 +8,14 @@ import (
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/tasklist"
 	"quick-ai-toolhub/internal/timeline"
+	"quick-ai-toolhub/internal/worktreeprep"
 )
 
 type Service struct {
 	logger       *slog.Logger
 	store        *store.Service
 	tasklist     TaskListTool
+	worktreePrep WorktreePrepTool
 	orchestrator *orchestrator.Service
 	timeline     *timeline.Service
 }
@@ -22,6 +24,7 @@ type Dependencies struct {
 	Logger       *slog.Logger
 	Store        *store.Service
 	TaskList     TaskListTool
+	WorktreePrep WorktreePrepTool
 	Orchestrator *orchestrator.Service
 	Timeline     *timeline.Service
 }
@@ -30,11 +33,16 @@ type TaskListTool interface {
 	Execute(context.Context, tasklist.Request) tasklist.Response
 }
 
+type WorktreePrepTool interface {
+	Execute(context.Context, worktreeprep.Request, worktreeprep.ExecuteOptions) worktreeprep.Response
+}
+
 func New(deps Dependencies) *Service {
 	return &Service{
 		logger:       componentLogger(deps.Logger),
 		store:        deps.Store,
 		tasklist:     deps.TaskList,
+		worktreePrep: deps.WorktreePrep,
 		orchestrator: deps.Orchestrator,
 		timeline:     deps.Timeline,
 	}
