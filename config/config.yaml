@@ -9,15 +9,16 @@ database:
 server:
   listen_addr: 127.0.0.1:8080
 
-default_model: gpt-5.3-codex-spark
+default_model: gpt-5.4
 
 agents:
   developer:
     model: gpt-5.4
     template_file: prompts/agents/developer.md
   qa:
-    model: gpt-5.3-codex-spark
+    model: gpt-5.4
     template_file: prompts/agents/qa.md
   reviewer:
-    model: gpt-5.3-codex-spark
+    model: gpt-5.4
     template_file: prompts/agents/reviewer.md
+
