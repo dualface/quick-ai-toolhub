@@ -1150,12 +1150,15 @@ agents:
 `)+"\n")
 	mustWriteFile(t, filepath.Join(root, "prompts/agents/developer.md"), strings.TrimSpace(`
 - Implement the task end-to-end within scope.
+- Start by identifying the binding contract for this task from README.md, TECH-V1.md, PROJECT-DEVELOPER-GUIDE.md, and the task brief before making code changes.
+- If the task implements or changes a named tool, keep its public schema and caller-facing semantics aligned with TECH-V1.md; do not invent new fields or statuses unless you update the spec and callers in the same change.
 - If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
 - After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.
 - If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.
+- Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.
 - After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.
-- Run the smallest validation that proves both the reported issue and the adjacent paths are covered before finishing.
+- Run the smallest validation that proves both the reported issue and the contract-level behavior are covered before finishing.
 - Finish {{.TaskID}} in scope.
 `)+"\n")
 	mustWriteFile(t, filepath.Join(root, "prompts/agents/qa.md"), strings.TrimSpace(`
@@ -1455,6 +1458,8 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 		"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
 		"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
 		"After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
+		"- Contract Checklist:",
+		"- Validation Checklist:",
 		"- latest_qa_artifact_refs:",
 		"- latest_qa_feedback:",
 		"- latest_reviewer_artifact_refs:",
@@ -1467,6 +1472,68 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 	}
 	if strings.Index(prompt, "latest_qa_artifact_refs") > strings.Index(prompt, "latest_reviewer_artifact_refs") {
 		t.Fatalf("expected QA artifact refs to appear before reviewer artifact refs, got:\n%s", prompt)
+	}
+}
+
+func TestBuildPromptDeveloperIncludesToolContractExcerpt(t *testing.T) {
+	repo := t.TempDir()
+	mustWriteFile(t, filepath.Join(repo, "TECH-V1.md"), strings.Join([]string{
+		"# TECH-V1",
+		"",
+		"### `review-aggregation-tool`",
+		"",
+		"```yaml",
+		"request:",
+		"  task_id: string",
+		"  review_results:",
+		"    - reviewer_id: string",
+		"      lens: string",
+		"      status: string",
+		"      findings: [finding]",
+		"",
+		"response.data:",
+		"  aggregated_findings: [finding]",
+		"  decision: pass | request_changes | awaiting_human",
+		"  summary: string",
+		"```",
+		"",
+		"### `task-pr-tool`",
+		"",
+		"```yaml",
+		"request:",
+		"  op: create",
+		"```",
+		"",
+	}, "\n"))
+
+	task := &issuesync.TaskBrief{
+		TaskID:             "Sprint-04/Task-03",
+		Title:              "实现 review-aggregation-tool",
+		Goal:               "实现纯聚合的 `review-aggregation-tool`。",
+		Reads:              []string{"TECH-V1.md"},
+		AcceptanceCriteria: []string{"输出结构符合 `TECH-V1.md`"},
+		Source:             filepath.Join(repo, "plan/tasks/Sprint-04/Task-03.md"),
+	}
+	sprint := &issuesync.Sprint{ID: "Sprint-04", Goal: "Sprint Goal"}
+
+	prompt := buildPrompt(AgentDeveloper, task, sprint, 1, "", ContextRefs{
+		SprintID:     "Sprint-04",
+		WorktreePath: repo,
+	}, repo, "")
+
+	for _, needle := range []string{
+		"Preserve the public request/response contract defined in `TECH-V1.md` for `review-aggregation-tool`;",
+		"- Relevant Spec Excerpts:",
+		"TECH-V1 `review-aggregation-tool` contract:",
+		"task_id: string",
+		"aggregated_findings: [finding]",
+	} {
+		if !strings.Contains(prompt, needle) {
+			t.Fatalf("missing %q in prompt:\n%s", needle, prompt)
+		}
+	}
+	if strings.Contains(prompt, "TECH-V1 `task-pr-tool` contract:") {
+		t.Fatalf("unexpected unrelated tool excerpt in prompt:\n%s", prompt)
 	}
 }
 

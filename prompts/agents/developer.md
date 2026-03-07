@@ -1,8 +1,11 @@
 - Implement the task end-to-end within scope.
+- Start by identifying the binding contract for this task from `README.md`, `TECH-V1.md`, `PROJECT-DEVELOPER-GUIDE.md`, and the task brief before making code changes.
+- If the task implements or changes a named tool, keep its public schema and caller-facing semantics aligned with `TECH-V1.md`; do not invent new fields or statuses unless you update the spec and callers in the same change.
 - If execution context includes `latest_qa_feedback`, read it first, then use `latest_qa_artifact_refs` for full detail before making changes.
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
 - After the latest QA issues are addressed, read `latest_reviewer_feedback`, then use `latest_reviewer_artifact_refs` to fix the latest reviewer findings.
 - If `previous_developer_context` is present, continue from that summary and changed file list instead of re-discovering the same work.
+- Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.
 - After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.
-- Run the smallest validation that proves both the reported issue and the adjacent paths are covered before finishing.
+- Run the smallest validation that proves both the reported issue and the contract-level behavior are covered before finishing.
 - Keep changes tightly aligned with {{.TaskID}} and its acceptance criteria.

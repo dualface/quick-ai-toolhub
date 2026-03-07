@@ -3,11 +3,20 @@ package agentrun
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"quick-ai-toolhub/internal/issuesync"
 )
+
+var toolIDPattern = regexp.MustCompile("`?([a-z0-9]+(?:-[a-z0-9]+)*-tool)`?")
+
+type promptExcerpt struct {
+	Title string
+	Body  string
+}
 
 func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesync.Sprint, attempt int, lens string, contextRefs ContextRefs, workdir, roleInstructions string) string {
 	var b strings.Builder
@@ -34,6 +43,11 @@ func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesy
 	writePromptList(&b, "Acceptance Criteria", task.AcceptanceCriteria)
 	if len(task.Dependencies) > 0 {
 		writePromptList(&b, "Dependencies", task.Dependencies)
+	}
+	if agentType == AgentDeveloper {
+		writePromptList(&b, "Contract Checklist", buildDeveloperContractChecklist(task))
+		writePromptExcerptSection(&b, "Relevant Spec Excerpts", buildRelevantSpecExcerpts(task, workdir))
+		writePromptList(&b, "Validation Checklist", buildDeveloperValidationChecklist(task))
 	}
 	b.WriteString("\n")
 
@@ -103,6 +117,28 @@ func writePromptList(b *strings.Builder, heading string, values []string) {
 			continue
 		}
 		fmt.Fprintf(b, "  - %s\n", value)
+	}
+}
+
+func writePromptExcerptSection(b *strings.Builder, heading string, excerpts []promptExcerpt) {
+	if len(excerpts) == 0 {
+		return
+	}
+
+	fmt.Fprintf(b, "- %s:\n", heading)
+	for _, excerpt := range excerpts {
+		if strings.TrimSpace(excerpt.Body) == "" {
+			continue
+		}
+		fmt.Fprintf(b, "  - %s:\n", excerpt.Title)
+		for _, line := range strings.Split(excerpt.Body, "\n") {
+			line = strings.TrimRight(line, " \t")
+			if line == "" {
+				fmt.Fprintln(b, "    ")
+				continue
+			}
+			fmt.Fprintf(b, "    %s\n", line)
+		}
 	}
 }
 
@@ -238,6 +274,132 @@ func fallbackPromptValue(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func buildDeveloperContractChecklist(task *issuesync.TaskBrief) []string {
+	checklist := []string{
+		"Treat `README.md`, `TECH-V1.md`, `PROJECT-DEVELOPER-GUIDE.md`, and this task brief as binding requirements for behavior and interfaces.",
+		"Before coding, identify the public contract, workflow rule, or state transition this task is responsible for and keep the implementation aligned to it.",
+		"Map each acceptance criterion to at least one code path or validation step before finishing.",
+	}
+
+	toolIDs := inferReferencedToolIDs(task)
+	for _, toolID := range toolIDs {
+		checklist = append(checklist,
+			fmt.Sprintf("Preserve the public request/response contract defined in `TECH-V1.md` for `%s`; do not invent new fields or statuses unless you update the spec and all direct callers in the same task.", toolID),
+		)
+	}
+	if len(toolIDs) > 0 {
+		checklist = append(checklist, "Add focused contract tests for any new or changed tool schema, enum, or decision mapping introduced by this task.")
+	}
+	if len(task.OutOfScope) > 0 {
+		checklist = append(checklist, "Keep any behavior explicitly listed under `Out of Scope` out of this change, even if it looks adjacent or convenient.")
+	}
+
+	return checklist
+}
+
+func buildDeveloperValidationChecklist(task *issuesync.TaskBrief) []string {
+	checklist := []string{
+		"Run the smallest set of tests that proves the intended behavior and the contract-level constraints both hold.",
+		"Verify any public tool schema, enum normalization, or workflow decision introduced here with explicit tests instead of relying only on internal helper tests.",
+	}
+	for _, criterion := range task.AcceptanceCriteria {
+		criterion = strings.TrimSpace(criterion)
+		if criterion == "" {
+			continue
+		}
+		checklist = append(checklist, fmt.Sprintf("Confirm this acceptance criterion is covered by code and validation: %s", criterion))
+	}
+	return checklist
+}
+
+func buildRelevantSpecExcerpts(task *issuesync.TaskBrief, workdir string) []promptExcerpt {
+	toolIDs := inferReferencedToolIDs(task)
+	if len(toolIDs) == 0 {
+		return nil
+	}
+
+	var excerpts []promptExcerpt
+	for _, toolID := range toolIDs {
+		body, ok := extractTechToolExcerpt(workdir, toolID)
+		if !ok {
+			continue
+		}
+		excerpts = append(excerpts, promptExcerpt{
+			Title: fmt.Sprintf("TECH-V1 `%s` contract", toolID),
+			Body:  body,
+		})
+	}
+	return excerpts
+}
+
+func inferReferencedToolIDs(task *issuesync.TaskBrief) []string {
+	seen := map[string]struct{}{}
+	var toolIDs []string
+
+	addFrom := func(value string) {
+		for _, match := range toolIDPattern.FindAllStringSubmatch(value, -1) {
+			toolID := strings.TrimSpace(match[1])
+			if toolID == "" {
+				continue
+			}
+			if _, ok := seen[toolID]; ok {
+				continue
+			}
+			seen[toolID] = struct{}{}
+			toolIDs = append(toolIDs, toolID)
+		}
+	}
+
+	addFrom(task.Title)
+	addFrom(task.Goal)
+	for _, value := range task.Reads {
+		addFrom(value)
+	}
+	for _, value := range task.Deliverables {
+		addFrom(value)
+	}
+	for _, value := range task.AcceptanceCriteria {
+		addFrom(value)
+	}
+
+	return toolIDs
+}
+
+func extractTechToolExcerpt(workdir, toolID string) (string, bool) {
+	techPath := filepath.Join(workdir, "TECH-V1.md")
+	content, err := os.ReadFile(techPath)
+	if err != nil {
+		return "", false
+	}
+
+	lines := strings.Split(string(content), "\n")
+	header := "### `" + toolID + "`"
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == header {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		return "", false
+	}
+
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "### ") {
+			end = i
+			break
+		}
+	}
+
+	body := strings.TrimSpace(strings.Join(lines[start+1:end], "\n"))
+	if body == "" {
+		return "", false
+	}
+	return body, true
 }
 
 func defaultRoleInstructions(agentType AgentType) string {
