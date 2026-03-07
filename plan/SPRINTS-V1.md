@@ -129,10 +129,13 @@
 
 | task_id   | 标题                        | 交付                                                       |
 | --------- | --------------------------- | ---------------------------------------------------------- |
-| `Task-01` | 实现 GitHub outbox worker   | 按 `outbox_actions` 执行幂等的 GitHub 写操作               |
-| `Task-02` | 实现 task-pr-tool           | 创建 / 更新 `Task PR` 并回写本地 PR 投影                   |
-| `Task-03` | 实现 ci-status-tool         | 读取 `GitHub Actions` 状态并判断 `ci_passed` / `ci_failed` |
-| `Task-04` | 实现 issue-maintenance-tool | 追加评论、维护 `needs-human`、在完成时关闭 task issue      |
+| `Task-01` | 实现 GitHub outbox worker       | 按 `outbox_actions` 执行幂等的 GitHub 写操作                         |
+| `Task-02` | 实现 task-pr-tool 创建更新能力  | 创建 / 更新 `Task PR` 并回写本地 PR 投影                             |
+| `Task-03` | 实现 task-pr 自动合并接线       | 启用自动合并并同步 Task PR 合并相关状态                              |
+| `Task-04` | 实现 ci-status-tool 读取归一化  | 读取 `GitHub Actions` run / checks 并输出稳定 CI 视图                |
+| `Task-05` | 实现 CI 决策映射                | 将 CI 视图映射为 `ci_passed` / `ci_failed` / `in_progress` 决策输入   |
+| `Task-06` | 实现 issue 评论与标签维护       | 追加评论并维护 `needs-human` 标签                                    |
+| `Task-07` | 实现 task issue 关闭收尾        | 在 task 完成时关闭或重开 task issue，并回写维护结果                  |
 
 ## [Sprint-06] Sprint 收尾与恢复
 
@@ -152,11 +155,14 @@
 
 | task_id   | 标题                           | 交付                                                                               |
 | --------- | ------------------------------ | ---------------------------------------------------------------------------------- |
-| `Task-01` | 实现 Sprint 级 reviewer 审查流 | 在 `Sprint Branch` 上并发启动 reviewer、聚合 findings，并形成 `Sprint PR` 前置结论 |
-| `Task-02` | 实现 sprint-pr-tool            | 创建并跟踪 `Sprint PR`，等待人工审查与合并                                         |
-| `Task-03` | 实现 timeline-log-tool         | 追加写 `logs/<sprint>.log` 并记录关键时间线事件                                    |
-| `Task-04` | 实现 Leader 恢复与定时对账     | 启动恢复、周期性对账、补写缺失事件和状态修正                                       |
-| `Task-05` | 实现人工接管收口               | 生成 handoff 摘要，统一 `needs-human` 触发和解除流程                               |
+| `Task-01` | 实现 Sprint reviewer 并发调度   | 在 `Sprint Branch` 上并发启动异质化 reviewer                                      |
+| `Task-02` | 实现 Sprint 级 review 聚合      | 聚合 Sprint reviewer findings 并形成 `Sprint PR` 前置结论                         |
+| `Task-03` | 实现 sprint-pr-tool             | 创建并跟踪 `Sprint PR`，等待人工审查与合并                                         |
+| `Task-04` | 实现 timeline-log-tool          | 追加写 `logs/<sprint>.log` 并记录关键时间线事件                                    |
+| `Task-05` | 实现 Leader 启动恢复            | 启动时恢复当前 `Sprint` / `Task` 控制状态                                          |
+| `Task-06` | 实现 Leader 定时对账修复        | 周期性对账、补写缺失事件并修正漂移状态                                             |
+| `Task-07` | 实现人工交接材料生成            | 生成 handoff 摘要并保存关键原因、建议动作和引用                                     |
+| `Task-08` | 实现人工接管状态流与恢复入口    | 统一 `needs-human` 触发、解除和恢复执行入口                                        |
 
 ## 实施顺序说明
 

@@ -1,48 +1,44 @@
-# [Sprint-06][Task-04] 实现 Leader 恢复与定时对账
+# [Sprint-06][Task-04] 实现 timeline-log-tool
 
 ## Goal
 
-在进程重启或外部状态漂移后，恢复 `Global Leader` 的本地控制面，并通过定时对账修复投影偏差。
+为每个 `Sprint` 维护一份人类可读的时间线日志，记录关键动作、状态变化和人工接管信息。
 
 ## Reads
 
 - `PROJECT-DEVELOPER-GUIDE.md`
 - `README.md`
-- `SPEC-V1.md`
 - `TECH-V1.md`
 - `plan/SPRINTS-V1.md`
 
 ## Dependencies
 
-- `Sprint-02/Task-03`
-- `Sprint-03/Task-04`
-- `Sprint-06/Task-03`
+- `Sprint-01/Task-05`
 
 ## In Scope
 
-- 启动时恢复当前 `Sprint` / `Task` 投影
-- 恢复正在进行中的工作状态
-- 周期性触发轻量全量对账
-- 发现漂移时补写事件并修正状态
+- 创建 `logs/<sprint>.log`
+- 实现普通日志追加
+- 实现状态变化、错误、人工交接的专用追加接口
+- 统一日志写入格式
 
 ## Out of Scope
 
-- 多实例 leader 选举
-- 分布式锁
-- 跨仓库恢复
+- 作为状态机真源
+- 复杂日志检索系统
+- 结构化事件存储
 
 ## Deliverables
 
-- Leader 恢复逻辑
-- 定时对账 worker
-- 恢复与漂移修正测试
+- `timeline-log-tool` 实现
+- 基础日志追加测试
 
 ## Acceptance Criteria
 
-- 重启后系统能重新知道当前进行到哪个 `Sprint` / `Task`
-- 定时对账能补齐缺失投影或事件
-- 发现冲突时先记录对账事件，而不是静默覆盖
+- 输出结构符合 `TECH-V1.md`
+- 每个 `Sprint` 有独立日志文件
+- 状态变化、错误、人工交接都有明确记录格式
 
 ## Notes
 
-- 行为以事件驱动恢复规则和 GitHub 同步规则为准
+- 时间线日志只做人类审计入口，不参与调度决策

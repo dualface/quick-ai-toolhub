@@ -1,8 +1,8 @@
-# [Sprint-06][Task-05] 实现人工接管收口
+# [Sprint-06][Task-05] 实现 Leader 启动恢复
 
 ## Goal
 
-统一 `needs-human`、`awaiting_human`、`blocked`、`escalated` 等场景下的交接材料生成和恢复入口。
+在进程重启后恢复 `Global Leader` 的本地控制面，重新知道当前进行到哪个 `Sprint` / `Task` 以及进行中的工作状态。
 
 ## Reads
 
@@ -14,35 +14,35 @@
 
 ## Dependencies
 
-- `Sprint-05/Task-04`
-- `Sprint-06/Task-03`
+- `Sprint-02/Task-03`
+- `Sprint-03/Task-04`
 - `Sprint-06/Task-04`
 
 ## In Scope
 
-- 生成 handoff 摘要
-- 统一 `needs-human` 触发流程
-- 统一 `needs-human` 解除和恢复执行流程
-- 保存建议动作、原因和关键引用
+- 启动时恢复当前 `Sprint` / `Task` 投影
+- 恢复正在进行中的工作状态
+- 补充启动恢复测试
 
 ## Out of Scope
 
-- 人工审批界面
-- Issue 列表管理
-- 新的状态机设计
+- 周期性定时对账
+- 漂移修正策略
+- 多实例 leader 选举
+- 分布式锁
+- 跨仓库恢复
 
 ## Deliverables
 
-- 人工接管收口实现
-- handoff 数据结构
-- 触发和恢复流程测试
+- Leader 启动恢复逻辑
+- 启动恢复测试
 
 ## Acceptance Criteria
 
-- 进入人工处理时能产出清晰交接材料
-- 恢复执行时有统一入口，而不是分散特殊逻辑
-- 本地状态、时间线日志和 GitHub 提示可以保持一致
+- 重启后系统能重新知道当前进行到哪个 `Sprint` / `Task`
+- 正在进行中的工作状态可以被重新接管
+- 恢复行为与事件驱动状态机保持一致
 
 ## Notes
 
-- 该任务负责收口人工流程，不负责决定什么时候必须人工介入
+- 本任务只做启动恢复，不承担周期性漂移修复
