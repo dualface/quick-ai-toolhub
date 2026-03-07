@@ -16,6 +16,7 @@ import (
 	"quick-ai-toolhub/internal/agentrun"
 	"quick-ai-toolhub/internal/app"
 	sharedconfig "quick-ai-toolhub/internal/config"
+	"quick-ai-toolhub/internal/worktreeprep"
 )
 
 type fakeRunTaskExecutor struct {
@@ -24,6 +25,14 @@ type fakeRunTaskExecutor struct {
 
 func (f fakeRunTaskExecutor) RunTask(ctx context.Context, opts agentrun.RunOptions) (agentrun.Result, error) {
 	return f.run(ctx, opts)
+}
+
+type fakePrepareWorktreeExecutor struct {
+	execute func(context.Context, worktreeprep.Request, worktreeprep.ExecuteOptions) worktreeprep.Response
+}
+
+func (f fakePrepareWorktreeExecutor) Execute(ctx context.Context, req worktreeprep.Request, opts worktreeprep.ExecuteOptions) worktreeprep.Response {
+	return f.execute(ctx, req, opts)
 }
 
 func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
@@ -172,10 +181,85 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"toolhub serve", "github-sync-tool", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--no-progress"} {
+	for _, needle := range []string{"toolhub serve", "github-sync-tool", "prepare-worktree-tool", "--sprint-id", "--task-id", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}
+	}
+}
+
+func TestPrepareWorktreeToolOutputsJSONResponse(t *testing.T) {
+	root := newServeTestRepo(t)
+
+	orig := newPrepareWorktreeExecutor
+	t.Cleanup(func() { newPrepareWorktreeExecutor = orig })
+
+	newPrepareWorktreeExecutor = func() prepareWorktreeExecutor {
+		return fakePrepareWorktreeExecutor{
+			execute: func(_ context.Context, req worktreeprep.Request, opts worktreeprep.ExecuteOptions) worktreeprep.Response {
+				if req.SprintID != "Sprint-03" {
+					t.Fatalf("unexpected sprint id: %s", req.SprintID)
+				}
+				if req.TaskID != "Sprint-03/Task-03" {
+					t.Fatalf("unexpected task id: %s", req.TaskID)
+				}
+				if req.SprintBranch != "sprint/Sprint-03" {
+					t.Fatalf("unexpected sprint branch: %s", req.SprintBranch)
+				}
+				if req.TaskBranch != "task/Sprint-03/Task-03" {
+					t.Fatalf("unexpected task branch: %s", req.TaskBranch)
+				}
+				if req.WorktreeRoot != "/tmp/worktrees" {
+					t.Fatalf("unexpected worktree root: %s", req.WorktreeRoot)
+				}
+				if opts.DefaultBranch != "main" {
+					t.Fatalf("unexpected default branch: %s", opts.DefaultBranch)
+				}
+				if opts.WorkDir != root {
+					t.Fatalf("unexpected workdir: %s", opts.WorkDir)
+				}
+				if opts.Remote != "upstream" {
+					t.Fatalf("unexpected remote: %s", opts.Remote)
+				}
+
+				return worktreeprep.Response{
+					OK: true,
+					Data: &worktreeprep.ResponseData{
+						WorktreePath:  "/tmp/worktrees/Sprint-03/Task-03",
+						TaskBranch:    req.TaskBranch,
+						BaseBranch:    req.SprintBranch,
+						BaseCommitSHA: "abc123",
+						Reused:        true,
+					},
+				}
+			},
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := run(context.Background(), []string{
+		"prepare-worktree-tool",
+		"--workdir", root,
+		"--sprint-id", "Sprint-03",
+		"--task-id", "Sprint-03/Task-03",
+		"--worktree-root", "/tmp/worktrees",
+		"--remote", "upstream",
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run prepare-worktree-tool: %v", err)
+	}
+
+	var response worktreeprep.Response
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !response.OK || response.Data == nil {
+		t.Fatalf("unexpected response: %s", stdout.String())
+	}
+	if response.Data.WorktreePath != "/tmp/worktrees/Sprint-03/Task-03" {
+		t.Fatalf("unexpected worktree path: %s", response.Data.WorktreePath)
+	}
+	if response.Data.BaseCommitSHA != "abc123" {
+		t.Fatalf("unexpected base commit sha: %s", response.Data.BaseCommitSHA)
 	}
 }
 
@@ -187,10 +271,12 @@ func TestServeBootstrapsApplication(t *testing.T) {
 	t.Cleanup(func() { runServeApplication = orig })
 
 	var handler http.Handler
+	var expectedComponents []string
 	runServeApplication = func(ctx context.Context, application *app.Application) error {
 		if err := application.Bootstrap(ctx); err != nil {
 			return err
 		}
+		expectedComponents = application.ComponentNames()
 		var err error
 		handler, err = application.HTTPHandler()
 		return err
@@ -217,8 +303,17 @@ func TestServeBootstrapsApplication(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing components: %#v", payload["components"])
 	}
-	if len(components) != 6 {
-		t.Fatalf("unexpected component count: %d", len(components))
+	if len(components) != len(expectedComponents) {
+		t.Fatalf("unexpected component count: got %d want %d", len(components), len(expectedComponents))
+	}
+	for i, want := range expectedComponents {
+		got, ok := components[i].(string)
+		if !ok {
+			t.Fatalf("component %d is not a string: %#v", i, components[i])
+		}
+		if got != want {
+			t.Fatalf("unexpected component at index %d: got %s want %s", i, got, want)
+		}
 	}
 
 	if _, err := os.Stat(filepath.Join(root, ".toolhub", "toolhub.db")); err != nil {

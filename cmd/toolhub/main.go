@@ -21,14 +21,23 @@ import (
 	"quick-ai-toolhub/internal/logging"
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/tasklist"
+	"quick-ai-toolhub/internal/worktreeprep"
 )
 
 type runTaskExecutor interface {
 	RunTask(ctx context.Context, opts agentrun.RunOptions) (agentrun.Result, error)
 }
 
+type prepareWorktreeExecutor interface {
+	Execute(context.Context, worktreeprep.Request, worktreeprep.ExecuteOptions) worktreeprep.Response
+}
+
 var newRunTaskExecutor = func() runTaskExecutor {
 	return agentrun.NewExecutor(agentrun.ExecCommandRunner{})
+}
+
+var newPrepareWorktreeExecutor = func() prepareWorktreeExecutor {
+	return worktreeprep.New(worktreeprep.Dependencies{})
 }
 
 var runServeApplication = func(ctx context.Context, application *app.Application) error {
@@ -76,6 +85,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runGitHubSync(ctx, args[1:], stdout)
 	case "get-task-list", "get-task-list-tool":
 		return runGetTaskList(ctx, args[1:], stdout)
+	case "prepare-worktree", "prepare-worktree-tool":
+		return runPrepareWorktree(ctx, args[1:], stdout)
 	case "run-task":
 		return runRunTask(ctx, args[1:], stdout, stderr)
 	default:
@@ -91,12 +102,14 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  toolhub sync-issues [flags]")
 	fmt.Fprintln(w, "  toolhub github-sync-tool <op> [flags]")
 	fmt.Fprintln(w, "  toolhub get-task-list-tool [flags]")
+	fmt.Fprintln(w, "  toolhub prepare-worktree-tool [flags]")
 	fmt.Fprintln(w, "  toolhub run-task <task-id> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  serve                 Bootstrap the single-process application skeleton.")
 	fmt.Fprintln(w, "  github-sync-tool      Reconcile GitHub issues / PRs / CI into SQLite projections.")
 	fmt.Fprintln(w, "  get-task-list-tool    Read projected Sprint/Task state and report scheduling blockers.")
+	fmt.Fprintln(w, "  prepare-worktree-tool Create or reuse the Sprint/task branches and task worktree.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "sync-issues Flags:")
 	fmt.Fprintln(w, "  --apply                 Perform GitHub writes. Default is dry-run.")
@@ -117,6 +130,16 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --sprint-id             Required when refresh-mode=targeted.")
 	fmt.Fprintln(w, "  --config-file           Path to the repository config file. Defaults to CONFIG_FILE or config/config.yaml.")
 	fmt.Fprintln(w, "  --workdir               Repository worktree for config discovery.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "prepare-worktree-tool Flags:")
+	fmt.Fprintln(w, "  --sprint-id             Required sprint id.")
+	fmt.Fprintln(w, "  --task-id               Required task id.")
+	fmt.Fprintln(w, "  --sprint-branch         Optional; defaults to sprint/<sprint-id>.")
+	fmt.Fprintln(w, "  --task-branch           Optional; defaults to task/<task-id>.")
+	fmt.Fprintln(w, "  --worktree-root         Optional root for task worktrees.")
+	fmt.Fprintln(w, "  --remote                Git remote name. Defaults to origin.")
+	fmt.Fprintln(w, "  --config-file           Path to the repository config file. Defaults to CONFIG_FILE or config/config.yaml.")
+	fmt.Fprintln(w, "  --workdir               Repository worktree for config discovery and git operations.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "run-task Flags:")
 	fmt.Fprintln(w, "  --agent-type            developer | qa | reviewer")
@@ -466,6 +489,88 @@ func runGetTaskList(ctx context.Context, args []string, stdout io.Writer) error 
 	return writeTaskListResponse(stdout, response)
 }
 
+func runPrepareWorktree(ctx context.Context, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("prepare-worktree-tool", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var configFile string
+	var workdir string
+	var remote string
+	var request worktreeprep.Request
+	fs.StringVar(&request.SprintID, "sprint-id", "", "sprint id")
+	fs.StringVar(&request.TaskID, "task-id", "", "task id")
+	fs.StringVar(&request.SprintBranch, "sprint-branch", "", "sprint branch")
+	fs.StringVar(&request.TaskBranch, "task-branch", "", "task branch")
+	fs.StringVar(&request.WorktreeRoot, "worktree-root", "", "task worktree root")
+	fs.StringVar(&remote, "remote", "", "git remote name")
+	fs.StringVar(&configFile, "config-file", "", "path to repository config")
+	fs.StringVar(&workdir, "workdir", ".", "repository worktree for config discovery and git operations")
+
+	if err := fs.Parse(args); err != nil {
+		return writePrepareWorktreeResponse(stdout, worktreeprep.Response{
+			OK: false,
+			Error: &worktreeprep.ToolError{
+				Code:      worktreeprep.ErrorCodeInvalid,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		})
+	}
+	if fs.NArg() != 0 {
+		return writePrepareWorktreeResponse(stdout, worktreeprep.Response{
+			OK: false,
+			Error: &worktreeprep.ToolError{
+				Code:      worktreeprep.ErrorCodeInvalid,
+				Message:   "prepare-worktree-tool does not accept positional arguments",
+				Retryable: false,
+			},
+		})
+	}
+
+	request.SprintID = strings.TrimSpace(request.SprintID)
+	request.TaskID = strings.TrimSpace(request.TaskID)
+	request.SprintBranch = strings.TrimSpace(request.SprintBranch)
+	request.TaskBranch = strings.TrimSpace(request.TaskBranch)
+	request.WorktreeRoot = strings.TrimSpace(request.WorktreeRoot)
+	if request.SprintBranch == "" && request.SprintID != "" {
+		request.SprintBranch = "sprint/" + request.SprintID
+	}
+	if request.TaskBranch == "" && request.TaskID != "" {
+		request.TaskBranch = "task/" + request.TaskID
+	}
+
+	absWorkDir, err := filepath.Abs(workdir)
+	if err != nil {
+		return writePrepareWorktreeResponse(stdout, worktreeprep.Response{
+			OK: false,
+			Error: &worktreeprep.ToolError{
+				Code:      worktreeprep.ErrorCodeInvalid,
+				Message:   fmt.Sprintf("resolve workdir: %v", err),
+				Retryable: false,
+			},
+		})
+	}
+
+	cfg, err := sharedconfig.Load(absWorkDir, configFile)
+	if err != nil {
+		return writePrepareWorktreeResponse(stdout, worktreeprep.Response{
+			OK: false,
+			Error: &worktreeprep.ToolError{
+				Code:      worktreeprep.ErrorCodeInvalid,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		})
+	}
+
+	response := newPrepareWorktreeExecutor().Execute(ctx, request, worktreeprep.ExecuteOptions{
+		WorkDir:       absWorkDir,
+		DefaultBranch: cfg.Repo.DefaultBranch,
+		Remote:        remote,
+	})
+	return writePrepareWorktreeResponse(stdout, response)
+}
+
 func readGitHubSyncRequest(r io.Reader) (githubsync.Request, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -605,6 +710,23 @@ func writeTaskListResponse(stdout io.Writer, response tasklist.Response) error {
 
 	exitCode := 1
 	if response.Error != nil && response.Error.Code == tasklist.ErrorCodeInvalid {
+		exitCode = 2
+	}
+	return &cliExitError{code: exitCode}
+}
+
+func writePrepareWorktreeResponse(stdout io.Writer, response worktreeprep.Response) error {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(response); err != nil {
+		return err
+	}
+	if response.OK {
+		return nil
+	}
+
+	exitCode := 1
+	if response.Error != nil && response.Error.Code == worktreeprep.ErrorCodeInvalid {
 		exitCode = 2
 	}
 	return &cliExitError{code: exitCode}
