@@ -20,6 +20,7 @@ import (
 	"quick-ai-toolhub/internal/logging"
 	"quick-ai-toolhub/internal/orchestrator"
 	"quick-ai-toolhub/internal/store"
+	"quick-ai-toolhub/internal/tasklist"
 	"quick-ai-toolhub/internal/timeline"
 )
 
@@ -53,6 +54,10 @@ func New(opts Options) *Application {
 		GitHub: githubClient,
 		Store:  storeService,
 	})
+	taskListService := tasklist.New(tasklist.Dependencies{
+		Logger: logger,
+		Store:  taskListStoreAdapter{service: storeService},
+	})
 	gitClient := toolgit.New(toolgit.Dependencies{Logger: logger})
 	timelineService := timeline.New(timeline.Dependencies{Logger: logger})
 	orchestratorService := orchestrator.New(orchestrator.Dependencies{
@@ -65,6 +70,7 @@ func New(opts Options) *Application {
 	leaderService := leader.New(leader.Dependencies{
 		Logger:       logger,
 		Store:        storeService,
+		TaskList:     taskListService,
 		Orchestrator: orchestratorService,
 		Timeline:     timelineService,
 	})
