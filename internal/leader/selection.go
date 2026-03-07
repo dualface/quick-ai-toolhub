@@ -131,7 +131,7 @@ func (s *Service) loadTaskList(ctx context.Context, req tasklist.Request) (taskl
 func selectNextSprint(data tasklist.ResponseData) SprintSelectionResult {
 	sprints := sortedSprints(data.Sprints)
 	for _, sprint := range sprints {
-		if isSprintTerminal(sprint.Status) {
+		if !isSprintSchedulable(sprint.Status) {
 			continue
 		}
 
@@ -145,7 +145,7 @@ func selectNextSprint(data tasklist.ResponseData) SprintSelectionResult {
 
 	reason := "no projected sprints available"
 	if len(sprints) > 0 {
-		reason = "all projected sprints are in terminal states"
+		reason = "no projected sprint is currently startable"
 	}
 
 	return SprintSelectionResult{
@@ -253,9 +253,9 @@ func normalizedBlockedReasons(values []string) []string {
 	return result
 }
 
-func isSprintTerminal(status string) bool {
+func isSprintSchedulable(status string) bool {
 	switch strings.TrimSpace(status) {
-	case "done", "blocked", "canceled":
+	case "todo", "in_progress", "partially_done":
 		return true
 	default:
 		return false

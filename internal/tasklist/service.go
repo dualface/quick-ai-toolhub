@@ -518,7 +518,7 @@ func sprintStatusBlockReason(status string) string {
 
 func taskStatusBlockReason(status string) string {
 	switch strings.TrimSpace(status) {
-	case "todo":
+	case "todo", "in_progress":
 		return ""
 	case "done":
 		return "task is already completed"

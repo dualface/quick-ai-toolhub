@@ -114,6 +114,60 @@ func TestExecuteOrdersByBusinessSequenceAndComputesBlocking(t *testing.T) {
 	}
 }
 
+func TestExecuteTreatsInProgressTaskAsSchedulableForRecovery(t *testing.T) {
+	base, service, _ := openTestStore(t)
+
+	insertSprintRow(t, service, sprintSeed{
+		SprintID:          "Sprint-03",
+		SequenceNo:        3,
+		GitHubIssueNumber: 103,
+		Status:            "in_progress",
+	})
+	insertTaskRow(t, service, taskSeed{
+		TaskID:                  "Sprint-03/Task-01",
+		SprintID:                "Sprint-03",
+		TaskLocalID:             "Task-01",
+		SequenceNo:              1,
+		GitHubIssueNumber:       301,
+		ParentGitHubIssueNumber: 103,
+		Status:                  "in_progress",
+	})
+	insertTaskRow(t, service, taskSeed{
+		TaskID:                  "Sprint-03/Task-02",
+		SprintID:                "Sprint-03",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       302,
+		ParentGitHubIssueNumber: 103,
+		Status:                  "todo",
+	})
+
+	response := New(Dependencies{Store: base}).Execute(context.Background(), Request{
+		RefreshMode: RefreshModeTargeted,
+		SprintID:    "Sprint-03",
+	})
+	if !response.OK {
+		t.Fatalf("expected task list to load, got %#v", response.Error)
+	}
+	if response.Data == nil {
+		t.Fatal("expected response data")
+	}
+	if len(response.Data.Tasks) != 2 {
+		t.Fatalf("expected two tasks, got %d", len(response.Data.Tasks))
+	}
+
+	inProgressTask := response.Data.Tasks[0]
+	if inProgressTask.Task.TaskID != "Sprint-03/Task-01" {
+		t.Fatalf("unexpected first task: %+v", inProgressTask.Task)
+	}
+	if len(inProgressTask.BlockedBy) != 0 {
+		t.Fatalf("expected in-progress task to stay schedulable for recovery, got %v", inProgressTask.BlockedBy)
+	}
+
+	nextTask := response.Data.Tasks[1]
+	assertContainsReason(t, nextTask.BlockedBy, "waiting for prior task Sprint-03/Task-01 to finish")
+}
+
 func TestExecuteSurfacesOrphanTaskBlockingIssue(t *testing.T) {
 	base, _, dbPath := openTestStore(t)
 

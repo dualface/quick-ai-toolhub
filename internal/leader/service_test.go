@@ -3,6 +3,7 @@ package leader
 import (
 	"context"
 	"testing"
+	"time"
 
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/tasklist"
@@ -98,13 +99,58 @@ func TestSelectNextTaskChoosesEarliestUnblockedTaskWithinSprint(t *testing.T) {
 	}
 }
 
+func TestSelectNextTaskReturnsInProgressTaskForRecovery(t *testing.T) {
+	tool := &fakeTaskListTool{
+		responses: map[string]tasklist.Response{
+			responseKey(tasklist.Request{
+				RefreshMode: tasklist.RefreshModeTargeted,
+				SprintID:    "Sprint-03",
+			}): successResponse(tasklist.ResponseData{
+				Tasks: []tasklist.TaskEntry{
+					{
+						Task: store.TaskProjection{
+							TaskID:      "Sprint-03/Task-01",
+							SprintID:    "Sprint-03",
+							TaskLocalID: "Task-01",
+							SequenceNo:  1,
+							Status:      "in_progress",
+						},
+					},
+					{
+						Task: store.TaskProjection{
+							TaskID:      "Sprint-03/Task-02",
+							SprintID:    "Sprint-03",
+							TaskLocalID: "Task-02",
+							SequenceNo:  2,
+							Status:      "todo",
+						},
+						BlockedBy: []string{"waiting for prior task Sprint-03/Task-01 to finish"},
+					},
+				},
+			}),
+		},
+	}
+
+	service := New(Dependencies{TaskList: tool})
+
+	result, err := service.SelectNextTask(context.Background(), "Sprint-03")
+	if err != nil {
+		t.Fatalf("select next task: %v", err)
+	}
+	if result.Status != SelectionStatusSelected {
+		t.Fatalf("expected selected status, got %s", result.Status)
+	}
+	if result.Task == nil || result.Task.TaskID != "Sprint-03/Task-01" {
+		t.Fatalf("expected Sprint-03/Task-01 to be resumed, got %+v", result.Task)
+	}
+}
+
 func TestSelectNextWorkItemReturnsNoSchedulableTaskForCurrentSprint(t *testing.T) {
 	tool := &fakeTaskListTool{
 		responses: map[string]tasklist.Response{
 			responseKey(tasklist.Request{RefreshMode: tasklist.RefreshModeFull}): successResponse(tasklist.ResponseData{
 				Sprints: []store.SprintProjection{
-					{SprintID: "Sprint-02", SequenceNo: 2, Status: "todo"},
-					{SprintID: "Sprint-01", SequenceNo: 1, Status: "awaiting_human"},
+					{SprintID: "Sprint-01", SequenceNo: 1, Status: "todo"},
 				},
 			}),
 			responseKey(tasklist.Request{
@@ -156,6 +202,51 @@ func TestSelectNextWorkItemReturnsNoSchedulableTaskForCurrentSprint(t *testing.T
 	}
 }
 
+func TestSelectNextWorkItemSkipsSprintStatusesThatCannotStartTasks(t *testing.T) {
+	tool := &fakeTaskListTool{
+		responses: map[string]tasklist.Response{
+			responseKey(tasklist.Request{RefreshMode: tasklist.RefreshModeFull}): successResponse(tasklist.ResponseData{
+				Sprints: []store.SprintProjection{
+					{SprintID: "Sprint-01", SequenceNo: 1, Status: "awaiting_human"},
+					{SprintID: "Sprint-02", SequenceNo: 2, Status: "todo"},
+				},
+			}),
+			responseKey(tasklist.Request{
+				RefreshMode: tasklist.RefreshModeTargeted,
+				SprintID:    "Sprint-02",
+			}): successResponse(tasklist.ResponseData{
+				Tasks: []tasklist.TaskEntry{
+					{
+						Task: store.TaskProjection{
+							TaskID:      "Sprint-02/Task-01",
+							SprintID:    "Sprint-02",
+							TaskLocalID: "Task-01",
+							SequenceNo:  1,
+							Status:      "todo",
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	service := New(Dependencies{TaskList: tool})
+
+	result, err := service.SelectNextWorkItem(context.Background())
+	if err != nil {
+		t.Fatalf("select next work item: %v", err)
+	}
+	if result.Status != SelectionStatusSelected {
+		t.Fatalf("expected selected status, got %s", result.Status)
+	}
+	if result.Sprint == nil || result.Sprint.SprintID != "Sprint-02" {
+		t.Fatalf("expected Sprint-02 to be selected, got %+v", result.Sprint)
+	}
+	if result.Task == nil || result.Task.TaskID != "Sprint-02/Task-01" {
+		t.Fatalf("expected Sprint-02/Task-01 to be selected, got %+v", result.Task)
+	}
+}
+
 func TestSelectNextWorkItemReturnsExplicitNoSprintWhenAllProjectedSprintsAreTerminal(t *testing.T) {
 	tool := &fakeTaskListTool{
 		responses: map[string]tasklist.Response{
@@ -183,7 +274,7 @@ func TestSelectNextWorkItemReturnsExplicitNoSprintWhenAllProjectedSprintsAreTerm
 	if result.Sprint != nil || result.Task != nil {
 		t.Fatalf("expected no sprint/task, got sprint=%+v task=%+v", result.Sprint, result.Task)
 	}
-	if result.Reason != "all projected sprints are in terminal states" {
+	if result.Reason != "no projected sprint is currently startable" {
 		t.Fatalf("unexpected reason: %s", result.Reason)
 	}
 	if len(result.BlockingIssues) != 1 || result.BlockingIssues[0].EntityID != "Sprint-02" {
@@ -275,6 +366,33 @@ func TestPrepareNextWorkItemUsesSelectedSprintAndTaskBranches(t *testing.T) {
 	}
 	if call.options.WorkDir != "/repo" || call.options.DefaultBranch != "main" || call.options.Remote != "origin" {
 		t.Fatalf("unexpected execute options: %+v", call.options)
+	}
+}
+
+func TestLockTaskStartupSerializesSameTaskID(t *testing.T) {
+	service := New(Dependencies{})
+
+	unlock := service.lockTaskStartup("Sprint-03/Task-04")
+
+	acquired := make(chan struct{})
+	go func() {
+		release := service.lockTaskStartup("Sprint-03/Task-04")
+		close(acquired)
+		release()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("expected second lock acquisition to block")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	unlock()
+
+	select {
+	case <-acquired:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected second lock acquisition after release")
 	}
 }
 

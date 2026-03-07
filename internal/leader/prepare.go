@@ -31,17 +31,27 @@ func (s *Service) PrepareNextWorkItem(ctx context.Context, opts PrepareNextWorkI
 	if err != nil {
 		return PreparedWorkItemResult{}, err
 	}
+	if selection.Status != SelectionStatusSelected || selection.Sprint == nil || selection.Task == nil {
+		return preparedWorkItemResultFromSelection(selection), nil
+	}
 
-	result := PreparedWorkItemResult{
+	unlock := s.lockTaskStartup(selection.Task.TaskID)
+	defer unlock()
+	return s.prepareSelectedWorkItem(ctx, selection, opts)
+}
+
+func preparedWorkItemResultFromSelection(selection WorkItemSelectionResult) PreparedWorkItemResult {
+	return PreparedWorkItemResult{
 		Status:         selection.Status,
 		Sprint:         copySprintProjection(selection.Sprint),
 		Task:           copyTaskProjection(selection.Task),
 		Reason:         selection.Reason,
 		BlockingIssues: copyBlockingIssues(selection.BlockingIssues),
 	}
-	if selection.Status != SelectionStatusSelected || selection.Sprint == nil || selection.Task == nil {
-		return result, nil
-	}
+}
+
+func (s *Service) prepareSelectedWorkItem(ctx context.Context, selection WorkItemSelectionResult, opts PrepareNextWorkItemOptions) (PreparedWorkItemResult, error) {
+	result := preparedWorkItemResultFromSelection(selection)
 	if s.worktreePrep == nil {
 		return PreparedWorkItemResult{}, errors.New("prepare worktree tool is required")
 	}

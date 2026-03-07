@@ -3,6 +3,7 @@ package leader
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"quick-ai-toolhub/internal/orchestrator"
 	"quick-ai-toolhub/internal/store"
@@ -18,6 +19,7 @@ type Service struct {
 	worktreePrep WorktreePrepTool
 	orchestrator *orchestrator.Service
 	timeline     *timeline.Service
+	taskStartMux sync.Map
 }
 
 type Dependencies struct {
@@ -57,4 +59,11 @@ func componentLogger(logger *slog.Logger) *slog.Logger {
 		return slog.Default().With("component", "leader")
 	}
 	return logger.With("component", "leader")
+}
+
+func (s *Service) lockTaskStartup(taskID string) func() {
+	actual, _ := s.taskStartMux.LoadOrStore(taskID, &sync.Mutex{})
+	mu := actual.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
