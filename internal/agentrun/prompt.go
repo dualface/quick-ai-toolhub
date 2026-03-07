@@ -45,7 +45,10 @@ func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesy
 	}
 	writeArtifactRefsSection(&b, "artifact_refs", contextRefs.ArtifactRefs)
 	writeArtifactRefsSection(&b, "latest_qa_artifact_refs", contextRefs.QAArtifactRefs)
+	writeFeedbackRefsSection(&b, "latest_qa_feedback", contextRefs.QAFeedback)
 	writeArtifactRefsSection(&b, "latest_reviewer_artifact_refs", contextRefs.ReviewerArtifactRefs)
+	writeFeedbackRefsSection(&b, "latest_reviewer_feedback", contextRefs.ReviewerFeedback)
+	writeDeveloperRefsSection(&b, "previous_developer_context", contextRefs.PreviousDeveloper)
 	b.WriteString("\n")
 
 	if strings.TrimSpace(roleInstructions) == "" {
@@ -146,15 +149,108 @@ func hasArtifactRefs(refs ArtifactRefs) bool {
 	return refs.Log != "" || refs.Worktree != "" || refs.Patch != "" || refs.Report != ""
 }
 
+func writeFeedbackRefsSection(b *strings.Builder, heading string, refs FeedbackRefs) {
+	if !hasFeedbackRefs(refs) {
+		return
+	}
+
+	fmt.Fprintf(b, "- %s:\n", heading)
+	if refs.Attempt > 0 {
+		fmt.Fprintf(b, "  - attempt: %d\n", refs.Attempt)
+	}
+	if refs.Status != "" {
+		fmt.Fprintf(b, "  - status: %s\n", refs.Status)
+	}
+	if refs.NextAction != "" {
+		fmt.Fprintf(b, "  - next_action: %s\n", refs.NextAction)
+	}
+	if refs.FailureFingerprint != "" {
+		fmt.Fprintf(b, "  - failure_fingerprint: %s\n", refs.FailureFingerprint)
+	}
+	if refs.Summary != "" {
+		fmt.Fprintf(b, "  - summary: %s\n", normalizePromptText(refs.Summary))
+	}
+	if len(refs.Findings) == 0 {
+		fmt.Fprintf(b, "  - findings: none\n")
+		return
+	}
+
+	b.WriteString("  - findings:\n")
+	for _, finding := range refs.Findings {
+		fmt.Fprintf(
+			b,
+			"    - severity=%s confidence=%s lens=%s category=%s reviewer_id=%s\n",
+			fallbackPromptValue(finding.Severity, "unknown"),
+			fallbackPromptValue(finding.Confidence, "unknown"),
+			fallbackPromptValue(finding.Lens, "unknown"),
+			fallbackPromptValue(finding.Category, "unknown"),
+			fallbackPromptValue(finding.ReviewerID, "unknown"),
+		)
+		if finding.Summary != "" {
+			fmt.Fprintf(b, "      summary: %s\n", normalizePromptText(finding.Summary))
+		}
+		if len(finding.FileRefs) > 0 {
+			fmt.Fprintf(b, "      file_refs: %s\n", strings.Join(finding.FileRefs, ", "))
+		}
+		if finding.FindingFingerprint != "" {
+			fmt.Fprintf(b, "      finding_fingerprint: %s\n", finding.FindingFingerprint)
+		}
+		if finding.SuggestedAction != "" {
+			fmt.Fprintf(b, "      suggested_action: %s\n", normalizePromptText(finding.SuggestedAction))
+		}
+	}
+}
+
+func writeDeveloperRefsSection(b *strings.Builder, heading string, refs DeveloperRefs) {
+	if !hasDeveloperRefs(refs) {
+		return
+	}
+
+	fmt.Fprintf(b, "- %s:\n", heading)
+	if refs.Attempt > 0 {
+		fmt.Fprintf(b, "  - attempt: %d\n", refs.Attempt)
+	}
+	if refs.Status != "" {
+		fmt.Fprintf(b, "  - status: %s\n", refs.Status)
+	}
+	if refs.NextAction != "" {
+		fmt.Fprintf(b, "  - next_action: %s\n", refs.NextAction)
+	}
+	if refs.Summary != "" {
+		fmt.Fprintf(b, "  - summary: %s\n", normalizePromptText(refs.Summary))
+	}
+	if len(refs.ChangedFiles) == 0 {
+		return
+	}
+
+	b.WriteString("  - changed_files:\n")
+	for _, path := range refs.ChangedFiles {
+		fmt.Fprintf(b, "    - %s\n", path)
+	}
+}
+
+func normalizePromptText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func fallbackPromptValue(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 func defaultRoleInstructions(agentType AgentType) string {
 	switch agentType {
 	case AgentDeveloper:
 		return strings.Join([]string{
 			"- Implement the task end-to-end within scope.",
-			"- If execution context includes latest_qa_artifact_refs, read the latest QA findings before making changes.",
+			"- If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.",
 			"- Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
-			"- After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.",
-			"- Run the smallest relevant validation before finishing.",
+			"- After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
+			"- If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+			"- After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
+			"- Run the smallest validation that proves both the reported issue and the adjacent paths are covered before finishing.",
 		}, "\n")
 	case AgentQA:
 		return strings.Join([]string{
@@ -176,6 +272,17 @@ func defaultRoleInstructions(agentType AgentType) string {
 }
 
 func resultSchemaJSON() ([]byte, error) {
+	requiredString := func(extra map[string]any) map[string]any {
+		schema := map[string]any{
+			"type":    "string",
+			"pattern": `.*\S.*`,
+		}
+		for key, value := range extra {
+			schema[key] = value
+		}
+		return schema
+	}
+
 	schema := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -238,21 +345,25 @@ func resultSchemaJSON() ([]byte, error) {
 								"suggested_action",
 							},
 							"properties": map[string]any{
-								"reviewer_id": map[string]any{"type": []string{"string", "null"}},
-								"lens":        map[string]any{"type": []string{"string", "null"}},
-								"severity":    map[string]any{"type": []string{"string", "null"}},
-								"confidence":  map[string]any{"type": []string{"string", "null"}},
-								"category":    map[string]any{"type": []string{"string", "null"}},
+								"reviewer_id": requiredString(nil),
+								"lens": requiredString(map[string]any{
+									"enum": AllowedReviewerLenses(),
+								}),
+								"severity": requiredString(map[string]any{
+									"enum": AllowedFindingSeverities(),
+								}),
+								"confidence": requiredString(map[string]any{
+									"enum": AllowedFindingConfidences(),
+								}),
+								"category": requiredString(nil),
 								"file_refs": map[string]any{
-									"anyOf": []any{
-										map[string]any{"type": "null"},
-										map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-									},
+									"type":  "array",
+									"items": map[string]any{"type": "string"},
 								},
-								"summary":             map[string]any{"type": []string{"string", "null"}},
-								"evidence":            map[string]any{"type": []string{"string", "null"}},
-								"finding_fingerprint": map[string]any{"type": []string{"string", "null"}},
-								"suggested_action":    map[string]any{"type": []string{"string", "null"}},
+								"summary":             requiredString(nil),
+								"evidence":            requiredString(nil),
+								"finding_fingerprint": requiredString(nil),
+								"suggested_action":    requiredString(nil),
 							},
 						},
 					},

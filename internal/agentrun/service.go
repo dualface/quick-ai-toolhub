@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -295,11 +297,19 @@ func applyAutomaticFeedbackContextRefs(opts *RunOptions, outputRoot string) {
 		return
 	}
 
-	if refs, ok := findLatestAgentRunArtifactRefs(opts.WorkDir, outputRoot, opts.TaskID, AgentQA); ok {
-		opts.ContextRefs.QAArtifactRefs = fillMissingArtifactRefs(opts.ContextRefs.QAArtifactRefs, refs)
+	if run, ok := findLatestUsableAgentRun(opts.WorkDir, outputRoot, opts.TaskID, AgentQA); ok {
+		opts.ContextRefs.QAArtifactRefs = fillMissingArtifactRefs(opts.ContextRefs.QAArtifactRefs, run.ArtifactRefs)
+		opts.ContextRefs.QAFeedback = fillMissingFeedbackRefs(opts.ContextRefs.QAFeedback, feedbackRefsFromHistoricalRun(run))
 	}
-	if refs, ok := findLatestAgentRunArtifactRefs(opts.WorkDir, outputRoot, opts.TaskID, AgentReviewer); ok {
-		opts.ContextRefs.ReviewerArtifactRefs = fillMissingArtifactRefs(opts.ContextRefs.ReviewerArtifactRefs, refs)
+	if run, ok := findLatestUsableAgentRun(opts.WorkDir, outputRoot, opts.TaskID, AgentReviewer); ok {
+		opts.ContextRefs.ReviewerArtifactRefs = fillMissingArtifactRefs(opts.ContextRefs.ReviewerArtifactRefs, run.ArtifactRefs)
+		opts.ContextRefs.ReviewerFeedback = fillMissingFeedbackRefs(opts.ContextRefs.ReviewerFeedback, feedbackRefsFromHistoricalRun(run))
+	}
+	if run, ok := findLatestUsableAgentRun(opts.WorkDir, outputRoot, opts.TaskID, AgentDeveloper); ok {
+		opts.ContextRefs.PreviousDeveloper = fillMissingDeveloperRefs(
+			opts.ContextRefs.PreviousDeveloper,
+			developerRefsFromHistoricalRun(run, listWorktreeChangedFiles(opts.WorkDir)),
+		)
 	}
 }
 
@@ -319,15 +329,61 @@ func fillMissingArtifactRefs(current, defaults ArtifactRefs) ArtifactRefs {
 	return current
 }
 
-func findLatestAgentRunArtifactRefs(workdir, outputRoot, taskID string, agentType AgentType) (ArtifactRefs, bool) {
+func fillMissingFeedbackRefs(current, defaults FeedbackRefs) FeedbackRefs {
+	if current.Attempt == 0 {
+		current.Attempt = defaults.Attempt
+	}
+	if current.Status == "" {
+		current.Status = defaults.Status
+	}
+	if current.NextAction == "" {
+		current.NextAction = defaults.NextAction
+	}
+	if current.FailureFingerprint == "" {
+		current.FailureFingerprint = defaults.FailureFingerprint
+	}
+	if current.Summary == "" {
+		current.Summary = defaults.Summary
+	}
+	if len(current.Findings) == 0 && len(defaults.Findings) > 0 {
+		current.Findings = append([]Finding(nil), defaults.Findings...)
+	}
+	return current
+}
+
+func fillMissingDeveloperRefs(current, defaults DeveloperRefs) DeveloperRefs {
+	if current.Attempt == 0 {
+		current.Attempt = defaults.Attempt
+	}
+	if current.Status == "" {
+		current.Status = defaults.Status
+	}
+	if current.NextAction == "" {
+		current.NextAction = defaults.NextAction
+	}
+	if current.Summary == "" {
+		current.Summary = defaults.Summary
+	}
+	if len(current.ChangedFiles) == 0 && len(defaults.ChangedFiles) > 0 {
+		current.ChangedFiles = append([]string(nil), defaults.ChangedFiles...)
+	}
+	return current
+}
+
+type historicalAgentRun struct {
+	Attempt      int
+	RunLeaf      string
+	Result       Result
+	ArtifactRefs ArtifactRefs
+}
+
+func findLatestUsableAgentRun(workdir, outputRoot, taskID string, agentType AgentType) (historicalAgentRun, bool) {
 	attemptDirs, err := filepath.Glob(filepath.Join(outputRoot, filepath.FromSlash(taskID), sanitizePathSegment(string(agentType)), "attempt-*"))
 	if err != nil {
-		return ArtifactRefs{}, false
+		return historicalAgentRun{}, false
 	}
 
-	bestAttempt := -1
-	bestRunLeaf := ""
-	bestReportPath := ""
+	best := historicalAgentRun{Attempt: -1}
 	for _, attemptDir := range attemptDirs {
 		attempt, ok := parseAttemptDirName(filepath.Base(attemptDir))
 		if !ok {
@@ -345,26 +401,126 @@ func findLatestAgentRunArtifactRefs(workdir, outputRoot, taskID string, agentTyp
 			}
 
 			runLeaf := filepath.Base(filepath.Dir(reportPath))
-			if attempt > bestAttempt || (attempt == bestAttempt && runLeaf > bestRunLeaf) {
-				bestAttempt = attempt
-				bestRunLeaf = runLeaf
-				bestReportPath = reportPath
+			result, err := readHistoricalRunResult(reportPath)
+			if err != nil || !isUsableFeedbackResult(result) {
+				continue
+			}
+
+			if attempt > best.Attempt || (attempt == best.Attempt && runLeaf > best.RunLeaf) {
+				best = historicalAgentRun{
+					Attempt: attempt,
+					RunLeaf: runLeaf,
+					Result:  result,
+					ArtifactRefs: ArtifactRefs{
+						Report: relOrAbs(workdir, reportPath),
+					},
+				}
+
+				logPath := filepath.Join(filepath.Dir(reportPath), "runner.log")
+				if logInfo, err := os.Stat(logPath); err == nil && !logInfo.IsDir() {
+					best.ArtifactRefs.Log = relOrAbs(workdir, logPath)
+				}
 			}
 		}
 	}
 
-	if bestReportPath == "" {
-		return ArtifactRefs{}, false
+	if best.Attempt <= 0 {
+		return historicalAgentRun{}, false
+	}
+	return best, true
+}
+
+func readHistoricalRunResult(reportPath string) (Result, error) {
+	reportBytes, err := os.ReadFile(reportPath)
+	if err != nil {
+		return Result{}, err
 	}
 
-	refs := ArtifactRefs{
-		Report: relOrAbs(workdir, bestReportPath),
+	var result Result
+	if err := json.Unmarshal(reportBytes, &result); err != nil {
+		return Result{}, err
 	}
-	logPath := filepath.Join(filepath.Dir(bestReportPath), "runner.log")
-	if info, err := os.Stat(logPath); err == nil && !info.IsDir() {
-		refs.Log = relOrAbs(workdir, logPath)
+	return result, nil
+}
+
+func isUsableFeedbackResult(result Result) bool {
+	if strings.TrimSpace(result.Status) == "" {
+		return false
 	}
-	return refs, true
+	if strings.EqualFold(strings.TrimSpace(result.NextAction), "retry") {
+		return false
+	}
+	switch strings.TrimSpace(result.FailureFingerprint) {
+	case ErrorCodeMalformedOutput, ErrorCodeRunnerExecution, ErrorCodeRunnerTimeout:
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(result.Status), "timeout")
+}
+
+func feedbackRefsFromHistoricalRun(run historicalAgentRun) FeedbackRefs {
+	return FeedbackRefs{
+		Attempt:            run.Attempt,
+		Status:             run.Result.Status,
+		NextAction:         run.Result.NextAction,
+		FailureFingerprint: run.Result.FailureFingerprint,
+		Summary:            run.Result.Summary,
+		Findings:           append([]Finding(nil), run.Result.Findings...),
+	}
+}
+
+func developerRefsFromHistoricalRun(run historicalAgentRun, changedFiles []string) DeveloperRefs {
+	return DeveloperRefs{
+		Attempt:      run.Attempt,
+		Status:       run.Result.Status,
+		NextAction:   run.Result.NextAction,
+		Summary:      run.Result.Summary,
+		ChangedFiles: append([]string(nil), changedFiles...),
+	}
+}
+
+func listWorktreeChangedFiles(workdir string) []string {
+	cmd := exec.Command("git", "status", "--short", "--untracked-files=all")
+	cmd.Dir = workdir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	seen := map[string]struct{}{}
+	var paths []string
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		path := parseGitStatusPath(scanner.Text())
+		if path == "" || shouldIgnoreChangedFile(path) {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func parseGitStatusPath(line string) string {
+	line = strings.TrimRight(line, "\r\n")
+	if strings.TrimSpace(line) == "" {
+		return ""
+	}
+	if len(line) >= 3 {
+		line = line[3:]
+	}
+	if idx := strings.LastIndex(line, " -> "); idx >= 0 {
+		line = line[idx+4:]
+	}
+	return filepath.ToSlash(strings.TrimSpace(line))
+}
+
+func shouldIgnoreChangedFile(path string) bool {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	return path == "" || strings.HasPrefix(path, ".toolhub/") || strings.HasPrefix(path, ".git/")
 }
 
 func parseAttemptDirName(name string) (int, bool) {
@@ -750,10 +906,19 @@ func getNullableString(value map[string]any, key string) (string, bool) {
 	return str, true
 }
 
-func parseNullableStringSlice(value any) ([]string, bool) {
-	if value == nil {
-		return nil, true
+func getRequiredTrimmedString(value map[string]any, key string) (string, bool) {
+	str, ok := getNullableString(value, key)
+	if !ok {
+		return "", false
 	}
+	str = strings.TrimSpace(str)
+	if str == "" {
+		return "", false
+	}
+	return str, true
+}
+
+func parseStringSlice(value any) ([]string, bool) {
 	items, ok := value.([]any)
 	if !ok {
 		return nil, false
@@ -772,43 +937,55 @@ func parseNullableStringSlice(value any) ([]string, bool) {
 }
 
 func parseFinding(entry map[string]any) (Finding, bool) {
-	reviewerID, ok := getNullableString(entry, "reviewer_id")
+	reviewerID, ok := getRequiredTrimmedString(entry, "reviewer_id")
 	if !ok {
 		return Finding{}, false
 	}
-	lens, ok := getNullableString(entry, "lens")
+	lens, ok := getRequiredTrimmedString(entry, "lens")
 	if !ok {
 		return Finding{}, false
 	}
-	severity, ok := getNullableString(entry, "severity")
+	lens, ok = NormalizeReviewerLens(lens)
 	if !ok {
 		return Finding{}, false
 	}
-	confidence, ok := getNullableString(entry, "confidence")
+	severity, ok := getRequiredTrimmedString(entry, "severity")
 	if !ok {
 		return Finding{}, false
 	}
-	category, ok := getNullableString(entry, "category")
+	severity, ok = NormalizeFindingSeverity(severity)
 	if !ok {
 		return Finding{}, false
 	}
-	fileRefs, ok := parseNullableStringSlice(entry["file_refs"])
+	confidence, ok := getRequiredTrimmedString(entry, "confidence")
 	if !ok {
 		return Finding{}, false
 	}
-	summary, ok := getNullableString(entry, "summary")
+	confidence, ok = NormalizeFindingConfidence(confidence)
 	if !ok {
 		return Finding{}, false
 	}
-	evidence, ok := getNullableString(entry, "evidence")
+	category, ok := getRequiredTrimmedString(entry, "category")
 	if !ok {
 		return Finding{}, false
 	}
-	fingerprint, ok := getNullableString(entry, "finding_fingerprint")
+	fileRefs, ok := parseStringSlice(entry["file_refs"])
 	if !ok {
 		return Finding{}, false
 	}
-	suggestedAction, ok := getNullableString(entry, "suggested_action")
+	summary, ok := getRequiredTrimmedString(entry, "summary")
+	if !ok {
+		return Finding{}, false
+	}
+	evidence, ok := getRequiredTrimmedString(entry, "evidence")
+	if !ok {
+		return Finding{}, false
+	}
+	fingerprint, ok := getRequiredTrimmedString(entry, "finding_fingerprint")
+	if !ok {
+		return Finding{}, false
+	}
+	suggestedAction, ok := getRequiredTrimmedString(entry, "suggested_action")
 	if !ok {
 		return Finding{}, false
 	}

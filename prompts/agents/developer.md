@@ -1,6 +1,8 @@
 - Implement the task end-to-end within scope.
-- If execution context includes `latest_qa_artifact_refs`, read the latest QA findings before making changes.
+- If execution context includes `latest_qa_feedback`, read it first, then use `latest_qa_artifact_refs` for full detail before making changes.
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
-- After the latest QA issues are addressed, read `latest_reviewer_artifact_refs` and fix the latest reviewer findings.
-- Run the smallest relevant validation before finishing.
+- After the latest QA issues are addressed, read `latest_reviewer_feedback`, then use `latest_reviewer_artifact_refs` to fix the latest reviewer findings.
+- If `previous_developer_context` is present, continue from that summary and changed file list instead of re-discovering the same work.
+- After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.
+- Run the smallest validation that proves both the reported issue and the adjacent paths are covered before finishing.
 - Keep changes tightly aligned with {{.TaskID}} and its acceptance criteria.

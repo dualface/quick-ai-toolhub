@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -125,12 +126,74 @@ func TestRunTaskExplicitModelOverridesConfig(t *testing.T) {
 	}
 }
 
-func TestRunTaskDeveloperUsesLatestFeedbackArtifactsAsContext(t *testing.T) {
+func TestRunTaskDeveloperUsesLatestUsableFeedbackArtifactsAsContext(t *testing.T) {
 	repo := setupTestRepo(t)
-	oldQAReport, oldQALog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 2, "default", "20260306T115900.000000000Z-oldqa")
-	newQAReport, newQALog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentQA, 10, "default", "20260306T120000.000000000Z-newqa")
-	oldReviewerReport, oldReviewerLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentReviewer, 1, "default", "20260306T115500.000000000Z-oldreview")
-	newReviewerReport, newReviewerLog := writeHistoricalRunArtifacts(t, repo, "Sprint-04/Task-01", AgentReviewer, 4, "default", "20260306T120100.000000000Z-newreview")
+	initGitRepo(t, repo)
+	oldQAReport, oldQALog := writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentQA, 2, "default", "20260306T115900.000000000Z-oldqa", Result{
+		Status:     "pass",
+		Summary:    "older qa summary",
+		NextAction: "none",
+	})
+	newQAReport, newQALog := writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentQA, 9, "default", "20260306T120000.000000000Z-newqa", Result{
+		Status:     "completed_with_findings",
+		Summary:    "latest usable qa summary",
+		NextAction: "return_to_developer",
+		Findings: []Finding{
+			{
+				ReviewerID:         "qa-agent",
+				Lens:               "correctness",
+				Severity:           "high",
+				Confidence:         "high",
+				Category:           "state_recovery",
+				FileRefs:           []string{"internal/orchestrator/run.go"},
+				Summary:            "qa finding summary",
+				FindingFingerprint: "qa:finding",
+				SuggestedAction:    "fix qa issue",
+			},
+		},
+	})
+	invalidQAReport, invalidQALog := writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentQA, 10, "default", "20260306T120500.000000000Z-invalidqa", Result{
+		Status:             "failed",
+		Summary:            "qa malformed output",
+		NextAction:         "retry",
+		FailureFingerprint: ErrorCodeMalformedOutput,
+	})
+	oldReviewerReport, oldReviewerLog := writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentReviewer, 1, "default", "20260306T115500.000000000Z-oldreview", Result{
+		Status:     "pass",
+		Summary:    "older reviewer summary",
+		NextAction: "none",
+	})
+	newReviewerReport, newReviewerLog := writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentReviewer, 4, "default", "20260306T120100.000000000Z-newreview", Result{
+		Status:     "completed_with_findings",
+		Summary:    "latest usable reviewer summary",
+		NextAction: "needs_fix",
+		Findings: []Finding{
+			{
+				ReviewerID:         "reviewer-agent",
+				Lens:               "architecture",
+				Severity:           "medium",
+				Confidence:         "high",
+				Category:           "contract_drift",
+				FileRefs:           []string{"internal/orchestrator/service.go"},
+				Summary:            "reviewer finding summary",
+				FindingFingerprint: "reviewer:finding",
+				SuggestedAction:    "fix reviewer issue",
+			},
+		},
+	})
+	invalidReviewerReport, invalidReviewerLog := writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentReviewer, 5, "default", "20260306T120200.000000000Z-invalidreview", Result{
+		Status:             "failed",
+		Summary:            "reviewer execution error",
+		NextAction:         "retry",
+		FailureFingerprint: ErrorCodeRunnerExecution,
+	})
+	writeHistoricalRunResult(t, repo, "Sprint-04/Task-01", AgentDeveloper, 7, "default", "20260306T120300.000000000Z-devrun", Result{
+		Status:     "completed",
+		Summary:    "continued previous developer work",
+		NextAction: "qa",
+	})
+	mustWriteFile(t, filepath.Join(repo, "README.md"), "# README updated\n")
+	mustWriteFile(t, filepath.Join(repo, "internal/orchestrator/run.go"), "package orchestrator\n")
 
 	runner := &fakeCommandRunner{
 		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
@@ -141,19 +204,29 @@ func TestRunTaskDeveloperUsesLatestFeedbackArtifactsAsContext(t *testing.T) {
 			if !strings.Contains(prompt, "- latest_reviewer_artifact_refs:\n  - log: "+newReviewerLog+"\n  - report: "+newReviewerReport) {
 				t.Fatalf("expected latest reviewer report in prompt, got:\n%s", prompt)
 			}
-			for _, stale := range []string{oldQAReport, oldQALog, oldReviewerReport, oldReviewerLog} {
+			for _, stale := range []string{oldQAReport, oldQALog, invalidQAReport, invalidQALog, oldReviewerReport, oldReviewerLog, invalidReviewerReport, invalidReviewerLog} {
 				if strings.Contains(prompt, stale) {
 					t.Fatalf("expected older feedback artifacts to be ignored, got:\n%s", prompt)
 				}
 			}
-			if !strings.Contains(prompt, "Fix the concrete problems called out by that latest QA round before doing any follow-on work.") {
-				t.Fatalf("expected QA repair instruction in prompt, got:\n%s", prompt)
-			}
-			if !strings.Contains(prompt, "After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.") {
-				t.Fatalf("expected reviewer repair instruction in prompt, got:\n%s", prompt)
+			for _, expected := range []string{
+				"- latest_qa_feedback:\n  - attempt: 9\n  - status: completed_with_findings\n  - next_action: return_to_developer\n  - summary: latest usable qa summary\n  - findings:\n    - severity=high confidence=high lens=correctness category=state_recovery reviewer_id=qa-agent",
+				"- latest_reviewer_feedback:\n  - attempt: 4\n  - status: completed_with_findings\n  - next_action: needs_fix\n  - summary: latest usable reviewer summary\n  - findings:\n    - severity=medium confidence=high lens=architecture category=contract_drift reviewer_id=reviewer-agent",
+				"- previous_developer_context:\n  - attempt: 7\n  - status: completed\n  - next_action: qa\n  - summary: continued previous developer work\n  - changed_files:\n    - README.md\n    - internal/orchestrator/run.go",
+				"If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.",
+				"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
+				"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+				"After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
+			} {
+				if !strings.Contains(prompt, expected) {
+					t.Fatalf("expected prompt to contain %q, got:\n%s", expected, prompt)
+				}
 			}
 			if strings.Index(prompt, "latest_qa_artifact_refs") > strings.Index(prompt, "latest_reviewer_artifact_refs") {
 				t.Fatalf("expected QA artifacts to appear before reviewer artifacts, got:\n%s", prompt)
+			}
+			if strings.Contains(prompt, ".toolhub/runs/") && strings.Contains(prompt, "changed_files:\n    - .toolhub/") {
+				t.Fatalf("expected runtime artifacts to be excluded from changed file list, got:\n%s", prompt)
 			}
 
 			lastMessagePath := findFlagValue(req.Args, "-o")
@@ -581,6 +654,70 @@ func TestRunTaskRejectsPartialArtifactRefsPayload(t *testing.T) {
 	}
 	if result.FailureFingerprint != ErrorCodeMalformedOutput {
 		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
+	}
+}
+
+func TestRunTaskRejectsInvalidReviewerFindingPayload(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "invalid lens",
+			payload: `{"status":"completed_with_findings","summary":"review found issues","next_action":"needs_changes","failure_fingerprint":null,"artifact_refs":null,"findings":[{"reviewer_id":"reviewer-ops","lens":"ops","severity":"high","confidence":"high","category":"correctness","file_refs":["internal/orchestrator/run.go"],"summary":"invalid lens","evidence":"lens is outside the supported set","finding_fingerprint":"review:invalid-lens","suggested_action":"use a standard lens"}]}`,
+		},
+		{
+			name:    "invalid severity",
+			payload: `{"status":"completed_with_findings","summary":"review found issues","next_action":"needs_changes","failure_fingerprint":null,"artifact_refs":null,"findings":[{"reviewer_id":"reviewer-ops","lens":"correctness","severity":"urgent","confidence":"high","category":"correctness","file_refs":["internal/orchestrator/run.go"],"summary":"invalid severity","evidence":"severity is outside the supported set","finding_fingerprint":"review:invalid-severity","suggested_action":"use a standard severity"}]}`,
+		},
+		{
+			name:    "invalid confidence",
+			payload: `{"status":"completed_with_findings","summary":"review found issues","next_action":"needs_changes","failure_fingerprint":null,"artifact_refs":null,"findings":[{"reviewer_id":"reviewer-ops","lens":"correctness","severity":"high","confidence":"certain","category":"correctness","file_refs":["internal/orchestrator/run.go"],"summary":"invalid confidence","evidence":"confidence is outside the supported set","finding_fingerprint":"review:invalid-confidence","suggested_action":"use a standard confidence"}]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := setupTestRepo(t)
+			runner := &fakeCommandRunner{
+				run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+					lastMessagePath := findFlagValue(req.Args, "-o")
+					if err := os.WriteFile(lastMessagePath, []byte(tc.payload), 0o644); err != nil {
+						t.Fatalf("write last message: %v", err)
+					}
+					return CommandResult{}, nil
+				},
+			}
+
+			executor := NewExecutor(runner)
+			executor.now = func() time.Time {
+				return time.Date(2026, 3, 6, 12, 4, 30, 0, time.UTC)
+			}
+			executor.runID = func() string { return "runid123" }
+
+			result, err := executor.RunTask(context.Background(), RunOptions{
+				TaskID:    "Sprint-04/Task-01",
+				AgentType: AgentReviewer,
+				PlanFile:  filepath.Join(repo, "plan/SPRINTS-V1.md"),
+				TasksDir:  filepath.Join(repo, "plan/tasks"),
+				WorkDir:   repo,
+			})
+			if err != nil {
+				t.Fatalf("run task: %v", err)
+			}
+
+			if result.Status != "failed" {
+				t.Fatalf("unexpected status: %s", result.Status)
+			}
+			if result.FailureFingerprint != ErrorCodeMalformedOutput {
+				t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
+			}
+		})
 	}
 }
 
@@ -1013,10 +1150,12 @@ agents:
 `)+"\n")
 	mustWriteFile(t, filepath.Join(root, "prompts/agents/developer.md"), strings.TrimSpace(`
 - Implement the task end-to-end within scope.
-- If execution context includes latest_qa_artifact_refs, read the latest QA findings before making changes.
+- If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
-- After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.
-- Run the smallest relevant validation before finishing.
+- After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.
+- If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.
+- After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.
+- Run the smallest validation that proves both the reported issue and the adjacent paths are covered before finishing.
 - Finish {{.TaskID}} in scope.
 `)+"\n")
 	mustWriteFile(t, filepath.Join(root, "prompts/agents/qa.md"), strings.TrimSpace(`
@@ -1152,6 +1291,48 @@ func TestResultSchemaJSONIsValidJSON(t *testing.T) {
 	if len(artifactRequired) != 4 {
 		t.Fatalf("unexpected artifact_refs required count: %d", len(artifactRequired))
 	}
+
+	findings := props["findings"].(map[string]any)
+	findingsAnyOf := findings["anyOf"].([]any)
+	findingItems := findingsAnyOf[1].(map[string]any)["items"].(map[string]any)
+	findingProps := findingItems["properties"].(map[string]any)
+	lens := findingProps["lens"].(map[string]any)
+	lensEnum := lens["enum"].([]any)
+	if len(lensEnum) != len(AllowedReviewerLenses()) {
+		t.Fatalf("unexpected reviewer lens enum count: %d", len(lensEnum))
+	}
+	for _, expected := range AllowedReviewerLenses() {
+		if !containsAnyString(lensEnum, expected) {
+			t.Fatalf("missing reviewer lens enum value %q: %v", expected, lensEnum)
+		}
+	}
+	severity := findingProps["severity"].(map[string]any)
+	severityEnum := severity["enum"].([]any)
+	if len(severityEnum) != len(AllowedFindingSeverities()) {
+		t.Fatalf("unexpected finding severity enum count: %d", len(severityEnum))
+	}
+	for _, expected := range AllowedFindingSeverities() {
+		if !containsAnyString(severityEnum, expected) {
+			t.Fatalf("missing finding severity enum value %q: %v", expected, severityEnum)
+		}
+	}
+	confidence := findingProps["confidence"].(map[string]any)
+	confidenceEnum := confidence["enum"].([]any)
+	if len(confidenceEnum) != len(AllowedFindingConfidences()) {
+		t.Fatalf("unexpected finding confidence enum count: %d", len(confidenceEnum))
+	}
+	for _, expected := range AllowedFindingConfidences() {
+		if !containsAnyString(confidenceEnum, expected) {
+			t.Fatalf("missing finding confidence enum value %q: %v", expected, confidenceEnum)
+		}
+	}
+	reviewerID := findingProps["reviewer_id"].(map[string]any)
+	if reviewerID["type"] != "string" {
+		t.Fatalf("unexpected reviewer_id type: %v", reviewerID["type"])
+	}
+	if reviewerID["pattern"] == "" {
+		t.Fatalf("expected reviewer_id pattern to reject blank values: %v", reviewerID)
+	}
 }
 
 func TestFormatCommandFailureIncludesStdout(t *testing.T) {
@@ -1233,17 +1414,52 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 		QAArtifactRefs: ArtifactRefs{
 			Report: ".toolhub/runs/Sprint-04/Task-01/qa/attempt-02/default/run/result.json",
 		},
+		QAFeedback: FeedbackRefs{
+			Attempt:    2,
+			Status:     "completed_with_findings",
+			NextAction: "return_to_developer",
+			Summary:    "qa summary",
+			Findings: []Finding{
+				{
+					ReviewerID:      "qa-agent",
+					Lens:            "correctness",
+					Severity:        "high",
+					Confidence:      "high",
+					Category:        "state_recovery",
+					Summary:         "qa finding",
+					SuggestedAction: "fix qa finding",
+				},
+			},
+		},
 		ReviewerArtifactRefs: ArtifactRefs{
 			Report: ".toolhub/runs/Sprint-04/Task-01/reviewer/attempt-01/default/run/result.json",
+		},
+		ReviewerFeedback: FeedbackRefs{
+			Attempt:    1,
+			Status:     "completed_with_findings",
+			NextAction: "needs_fix",
+			Summary:    "reviewer summary",
+		},
+		PreviousDeveloper: DeveloperRefs{
+			Attempt:      1,
+			Status:       "completed",
+			NextAction:   "qa",
+			Summary:      "developer summary",
+			ChangedFiles: []string{"internal/orchestrator/run.go"},
 		},
 	}, "/repo", "")
 
 	for _, needle := range []string{
-		"If execution context includes latest_qa_artifact_refs, read the latest QA findings before making changes.",
+		"If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.",
 		"Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
-		"After the latest QA issues are addressed, read latest_reviewer_artifact_refs and fix the latest reviewer findings.",
+		"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
+		"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+		"After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
 		"- latest_qa_artifact_refs:",
+		"- latest_qa_feedback:",
 		"- latest_reviewer_artifact_refs:",
+		"- latest_reviewer_feedback:",
+		"- previous_developer_context:",
 	} {
 		if !strings.Contains(prompt, needle) {
 			t.Fatalf("missing %q in prompt:\n%s", needle, prompt)
@@ -1255,6 +1471,14 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 }
 
 func writeHistoricalRunArtifacts(t *testing.T, repo, taskID string, agentType AgentType, attempt int, lens, runLeaf string) (string, string) {
+	return writeHistoricalRunResult(t, repo, taskID, agentType, attempt, lens, runLeaf, Result{
+		Status:     "pass",
+		Summary:    "historical run",
+		NextAction: "none",
+	})
+}
+
+func writeHistoricalRunResult(t *testing.T, repo, taskID string, agentType AgentType, attempt int, lens, runLeaf string, result Result) (string, string) {
 	t.Helper()
 
 	runDir := filepath.Join(
@@ -1269,7 +1493,11 @@ func writeHistoricalRunArtifacts(t *testing.T, repo, taskID string, agentType Ag
 	)
 	reportPath := filepath.Join(runDir, "result.json")
 	logPath := filepath.Join(runDir, "runner.log")
-	mustWriteFile(t, reportPath, `{"status":"pass"}`+"\n")
+	reportBytes, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal historical result: %v", err)
+	}
+	mustWriteFile(t, reportPath, string(reportBytes)+"\n")
 	mustWriteFile(t, logPath, "runner log\n")
 	return filepath.ToSlash(strings.TrimPrefix(reportPath, repo+string(os.PathSeparator))), filepath.ToSlash(strings.TrimPrefix(logPath, repo+string(os.PathSeparator)))
 }
@@ -1305,4 +1533,23 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func initGitRepo(t *testing.T, repo string) {
+	t.Helper()
+
+	for _, args := range [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "codex@example.com"},
+		{"git", "config", "user.name", "Codex"},
+		{"git", "add", "."},
+		{"git", "commit", "-m", "initial"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repo
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+		}
+	}
 }

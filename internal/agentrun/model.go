@@ -51,12 +51,15 @@ type RunOptions struct {
 }
 
 type ContextRefs struct {
-	SprintID             string       `json:"sprint_id,omitempty"`
-	WorktreePath         string       `json:"worktree_path,omitempty"`
-	GitHubPRNumber       int          `json:"github_pr_number,omitempty"`
-	ArtifactRefs         ArtifactRefs `json:"artifact_refs,omitempty"`
-	QAArtifactRefs       ArtifactRefs `json:"latest_qa_artifact_refs,omitempty"`
-	ReviewerArtifactRefs ArtifactRefs `json:"latest_reviewer_artifact_refs,omitempty"`
+	SprintID             string        `json:"sprint_id,omitempty"`
+	WorktreePath         string        `json:"worktree_path,omitempty"`
+	GitHubPRNumber       int           `json:"github_pr_number,omitempty"`
+	ArtifactRefs         ArtifactRefs  `json:"artifact_refs,omitempty"`
+	QAArtifactRefs       ArtifactRefs  `json:"latest_qa_artifact_refs,omitempty"`
+	QAFeedback           FeedbackRefs  `json:"latest_qa_feedback,omitempty"`
+	ReviewerArtifactRefs ArtifactRefs  `json:"latest_reviewer_artifact_refs,omitempty"`
+	ReviewerFeedback     FeedbackRefs  `json:"latest_reviewer_feedback,omitempty"`
+	PreviousDeveloper    DeveloperRefs `json:"previous_developer_context,omitempty"`
 }
 
 type ArtifactRefs struct {
@@ -77,6 +80,23 @@ type Finding struct {
 	Evidence           string   `json:"evidence,omitempty"`
 	FindingFingerprint string   `json:"finding_fingerprint,omitempty"`
 	SuggestedAction    string   `json:"suggested_action,omitempty"`
+}
+
+type FeedbackRefs struct {
+	Attempt            int       `json:"attempt,omitempty"`
+	Status             string    `json:"status,omitempty"`
+	NextAction         string    `json:"next_action,omitempty"`
+	FailureFingerprint string    `json:"failure_fingerprint,omitempty"`
+	Summary            string    `json:"summary,omitempty"`
+	Findings           []Finding `json:"findings,omitempty"`
+}
+
+type DeveloperRefs struct {
+	Attempt      int      `json:"attempt,omitempty"`
+	Status       string   `json:"status,omitempty"`
+	NextAction   string   `json:"next_action,omitempty"`
+	Summary      string   `json:"summary,omitempty"`
+	ChangedFiles []string `json:"changed_files,omitempty"`
 }
 
 type Result struct {
@@ -128,8 +148,17 @@ func (c ContextRefs) MarshalJSON() ([]byte, error) {
 	if hasArtifactRefValues(c.QAArtifactRefs) {
 		value["latest_qa_artifact_refs"] = c.QAArtifactRefs
 	}
+	if hasFeedbackRefs(c.QAFeedback) {
+		value["latest_qa_feedback"] = c.QAFeedback
+	}
 	if hasArtifactRefValues(c.ReviewerArtifactRefs) {
 		value["latest_reviewer_artifact_refs"] = c.ReviewerArtifactRefs
+	}
+	if hasFeedbackRefs(c.ReviewerFeedback) {
+		value["latest_reviewer_feedback"] = c.ReviewerFeedback
+	}
+	if hasDeveloperRefs(c.PreviousDeveloper) {
+		value["previous_developer_context"] = c.PreviousDeveloper
 	}
 	return json.Marshal(value)
 }
@@ -211,4 +240,21 @@ func nullableString(value string) *string {
 
 func hasArtifactRefValues(refs ArtifactRefs) bool {
 	return refs.Log != "" || refs.Worktree != "" || refs.Patch != "" || refs.Report != ""
+}
+
+func hasFeedbackRefs(refs FeedbackRefs) bool {
+	return refs.Attempt > 0 ||
+		refs.Status != "" ||
+		refs.NextAction != "" ||
+		refs.FailureFingerprint != "" ||
+		refs.Summary != "" ||
+		len(refs.Findings) > 0
+}
+
+func hasDeveloperRefs(refs DeveloperRefs) bool {
+	return refs.Attempt > 0 ||
+		refs.Status != "" ||
+		refs.NextAction != "" ||
+		refs.Summary != "" ||
+		len(refs.ChangedFiles) > 0
 }
