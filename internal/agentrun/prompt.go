@@ -47,7 +47,9 @@ func buildPrompt(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesy
 	if agentType == AgentDeveloper {
 		writePromptList(&b, "Contract Checklist", buildDeveloperContractChecklist(task))
 		writePromptExcerptSection(&b, "Relevant Spec Excerpts", buildRelevantSpecExcerpts(task, workdir))
+		writePromptList(&b, "Adjacent Contract Audit", buildDeveloperAdjacentAuditChecklist(task))
 		writePromptList(&b, "Validation Checklist", buildDeveloperValidationChecklist(task))
+		writePromptList(&b, "Acceptance Sweep", buildDeveloperAcceptanceSweepChecklist(task))
 	}
 	b.WriteString("\n")
 
@@ -314,6 +316,29 @@ func buildDeveloperValidationChecklist(task *issuesync.TaskBrief) []string {
 	return checklist
 }
 
+func buildDeveloperAdjacentAuditChecklist(task *issuesync.TaskBrief) []string {
+	checklist := []string{
+		"After fixing a validation or contract issue, enumerate sibling invalid-input and edge cases for the same interface before finishing.",
+		"Check adjacent required fields, uniqueness constraints, enum values, empty-input combinations, and contradictory status/result combinations for the touched contract.",
+	}
+	if len(inferReferencedToolIDs(task)) > 0 {
+		checklist = append(checklist, "For tool-contract tasks, do not stop at the exact failing example from QA; audit nearby request/response combinations that could still violate the same contract.")
+	}
+	return checklist
+}
+
+func buildDeveloperAcceptanceSweepChecklist(task *issuesync.TaskBrief) []string {
+	checklist := []string{
+		"Before finishing, remove dead code, stale helpers, and unreachable branches made obsolete by this task.",
+		"Do not leave replaced code paths behind if they can trigger lint failures or confuse future maintenance.",
+		"Run repository-level acceptance checks needed for this change when package-local tests are not sufficient to prove the task is ready to hand off.",
+	}
+	if len(task.Deliverables) > 0 {
+		checklist = append(checklist, "Confirm the current diff cleanly matches the task deliverables without unrelated leftovers.")
+	}
+	return checklist
+}
+
 func buildRelevantSpecExcerpts(task *issuesync.TaskBrief, workdir string) []promptExcerpt {
 	toolIDs := inferReferencedToolIDs(task)
 	if len(toolIDs) == 0 {
@@ -407,12 +432,18 @@ func defaultRoleInstructions(agentType AgentType) string {
 	case AgentDeveloper:
 		return strings.Join([]string{
 			"- Implement the task end-to-end within scope.",
+			"- Start by identifying the binding contract for this task from `README.md`, `TECH-V1.md`, `PROJECT-DEVELOPER-GUIDE.md`, and the task brief before making code changes.",
+			"- If the task implements or changes a named tool, keep its public schema and caller-facing semantics aligned with `TECH-V1.md`; do not invent new fields or statuses unless you update the spec and callers in the same change.",
 			"- If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.",
 			"- Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
 			"- After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
 			"- If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+			"- Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.",
+			"- After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.",
+			"- For tool-contract tasks, audit adjacent required fields, enum values, uniqueness constraints, empty-input combinations, and contradictory status/result combinations touched by the change.",
 			"- After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
-			"- Run the smallest validation that proves both the reported issue and the adjacent paths are covered before finishing.",
+			"- Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.",
+			"- Run the smallest validation that proves both the reported issue and the contract-level behavior are covered before finishing.",
 		}, "\n")
 	case AgentQA:
 		return strings.Join([]string{

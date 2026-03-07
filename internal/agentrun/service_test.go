@@ -1157,7 +1157,10 @@ agents:
 - After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.
 - If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.
 - Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.
+- After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.
+- For tool-contract tasks, audit adjacent required fields, enum values, uniqueness constraints, empty-input combinations, and contradictory status/result combinations touched by the change.
 - After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.
+- Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.
 - Run the smallest validation that proves both the reported issue and the contract-level behavior are covered before finishing.
 - Finish {{.TaskID}} in scope.
 `)+"\n")
@@ -1457,9 +1460,13 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 		"Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
 		"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
 		"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+		"After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.",
+		"Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.",
 		"After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
 		"- Contract Checklist:",
+		"- Adjacent Contract Audit:",
 		"- Validation Checklist:",
+		"- Acceptance Sweep:",
 		"- latest_qa_artifact_refs:",
 		"- latest_qa_feedback:",
 		"- latest_reviewer_artifact_refs:",
