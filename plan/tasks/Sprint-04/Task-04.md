@@ -2,7 +2,7 @@
 
 ## Goal
 
-将 `review-aggregation-tool` 接入 `Task Orchestrator` 的 review 阶段，落实补充审查、证据选择和统一流程决策。
+将 `review-aggregation-tool` 接入 `Task Orchestrator` 的 review 阶段，消费结构化 `conflict` / `supplemental_review` / `blocking` signals，落实补充审查、证据选择和统一流程决策。
 
 ## Reads
 
@@ -20,7 +20,7 @@
 ## In Scope
 
 - 在 review 阶段调用 `review-aggregation-tool`
-- 基于聚合结果决定 `return_to_developer` / `await_human` / `open_task_pr`
+- 基于结构化聚合结果决定 `return_to_developer` / `await_human` / `open_task_pr`
 - 接入补充审查或二次验证分支
 - 选择聚合后最合适的 `artifact_refs` 和结构化摘要
 - 补齐 orchestrator 侧 review 聚合回归测试
@@ -45,4 +45,4 @@
 
 ## Notes
 
-- 本任务关注“如何使用聚合结果”，不再重新实现一套 findings 聚合内核
+- 本任务关注“如何消费结构化聚合 contract”，不再重新实现一套 findings 聚合语义

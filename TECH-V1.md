@@ -351,6 +351,12 @@ response.data:
     reason: string
 ```
 
+职责边界：
+
+- reviewer 结果的语义聚合可以由 LLM 产出
+- `review-aggregation-tool` 负责对该聚合结果做 schema 校验、字段归一、枚举校验和决策优先级收口
+- 调用方消费的是工具输出的稳定 contract，而不是原始 LLM 文本
+
 约束：
 
 - `summary` 只做人类可读摘要；调用方不得解析 `summary` 文本代替结构化字段做流程分支

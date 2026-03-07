@@ -96,7 +96,7 @@ Sprint-01
 
 ## Reviewer 并发与聚合策略
 
-`Task Orchestrator` 必须支持在审查阶段并发运行多个 `Reviewer`，并对他们的 findings 做统一聚合。
+`Task Orchestrator` 必须支持在审查阶段并发运行多个 `Reviewer`，并对他们的 findings 做统一聚合。reviewer 语义聚合可以由 LLM 完成，但进入流程控制前必须经过稳定工具 contract 的验证与归一。
 
 强制规则如下：
 
@@ -133,6 +133,7 @@ Sprint-01
 - 聚合结果至少必须结构化暴露：`has_critical_finding`、`has_blocking_finding`、`has_conflict`、`has_reviewer_escalation`、`needs_supplemental_review`
 - 当 `blocking` 与 `conflict` 并存时，`conflict` 的人工/补充审查要求拥有更高的最终决策优先级，但 `blocking` 信号本身不得丢失
 - 当只存在 `needs_supplemental_review` 且不存在 `blocking` / `conflict` / `reviewer_escalation` 时，聚合结果应保留非阻塞决策，同时显式返回补充审查信号供上层继续验证
+- 语义聚合判断与 contract 验证/归一是两层职责：前者可由 LLM 完成，后者必须由稳定工具实现并强制收口
 
 ## 上下文管理原则
 
