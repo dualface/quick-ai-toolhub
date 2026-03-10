@@ -17,14 +17,14 @@
 ## Dependencies
 
 - `Sprint-01/Task-05`
-- `Sprint-03/Task-04`
+- `Sprint-03/Task-03`
 
 ## In Scope
 
 - 定义 Agent 调用接口
-- 支持 `codex_exec`
+- 支持 `codex-cli`
 - 支持超时控制和错误归类
-- 显式处理 `codex_exec` 的权限策略
+- 显式处理 `codex-cli` 的权限策略
 - 收集结构化结果和 `artifact_refs`
 - 为不同角色传入统一上下文载荷
 
@@ -43,7 +43,7 @@
 ## Acceptance Criteria
 
 - 输出结构符合 `TECH-V1.md`
-- 默认 runner 为 `codex_exec`
+- 默认 runner 为 `codex-cli`
 - 不依赖用户本机默认权限配置
 - 调用方可以稳定区分成功、失败、超时
 - `artifact_refs` 和结构化摘要可被阶段机直接消费
@@ -51,5 +51,5 @@
 ## Notes
 
 - 该工具应优先为可测试性设计，避免与具体 Agent 提供方强耦合
-- `v1` 先只实现 `codex_exec`
+- `v1` 先只实现 `codex-cli`
 - 进入 `QA` 前先完整执行 `Task-01-CHECKLIST.md`

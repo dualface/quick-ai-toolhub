@@ -72,7 +72,7 @@ type RunTaskOptions struct {
 	Timeout             time.Duration
 	Yolo                bool
 	IsolatedCodexHome   bool
-	ReviewerLenses      []string
+	ReviewerLens        string
 	MaxStageTransitions int
 }
 
@@ -208,7 +208,7 @@ func (s *Service) RunTask(ctx context.Context, opts RunTaskOptions) (RunTaskResu
 	if maxTransitions <= 0 {
 		maxTransitions = defaultMaxStageTransitions
 	}
-	reviewerLenses, err := normalizedReviewerLenses(opts.ReviewerLenses)
+	reviewerLens, err := normalizedReviewerLens(opts.ReviewerLens)
 	if err != nil {
 		return RunTaskResult{}, err
 	}
@@ -343,7 +343,7 @@ func (s *Service) RunTask(ctx context.Context, opts RunTaskOptions) (RunTaskResu
 				return RunTaskResult{}, err
 			}
 
-			stageResult, reviewFindings, err := s.runReviewStage(ctx, taskSnapshot, opts, reviewerLenses, lastQARefs)
+			stageResult, reviewFindings, err := s.runReviewStage(ctx, taskSnapshot, opts, reviewerLens, lastQARefs)
 			if err != nil {
 				return RunTaskResult{}, err
 			}

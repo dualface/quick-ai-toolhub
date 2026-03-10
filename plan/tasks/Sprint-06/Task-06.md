@@ -15,7 +15,7 @@
 ## Dependencies
 
 - `Sprint-02/Task-03`
-- `Sprint-03/Task-04`
+- `Sprint-03/Task-03`
 - `Sprint-06/Task-04`
 - `Sprint-06/Task-05`
 

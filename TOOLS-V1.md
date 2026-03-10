@@ -18,7 +18,7 @@
 | `get-task-list-tool`      | `Global Leader`                      | 返回可调度的 `Sprint` / `Task` 列表                 |
 | `prepare-worktree-tool`   | `Global Leader`                      | 准备 `Sprint Branch`、task branch 和 worktree       |
 | `run-agent-tool`          | `Task Orchestrator`                  | 启动 `Developer`、`QA`、`Reviewer` 并收集结构化结果 |
-| `review-aggregation-tool` | `Task Orchestrator`                  | 聚合 reviewer findings 并给出结论                   |
+| `review-result-tool`      | `Task Orchestrator`                  | 校验单个 reviewer 结果并给出稳定结论                 |
 | `task-pr-tool`            | `Task Orchestrator`                  | 创建 / 更新 `Task PR` 并处理自动合并                |
 | `ci-status-tool`          | `Task Orchestrator`                  | 读取 `GitHub Actions` 状态并映射为 task 决策输入    |
 
@@ -47,4 +47,4 @@
 
 实现顺序建议为：
 
-`task-state-store-tool -> github-sync-tool -> get-task-list-tool -> prepare-worktree-tool -> run-agent-tool -> review-aggregation-tool -> task-pr-tool -> ci-status-tool -> issue-maintenance-tool -> sprint-pr-tool -> timeline-log-tool`
+`task-state-store-tool -> github-sync-tool -> get-task-list-tool -> prepare-worktree-tool -> run-agent-tool -> review-result-tool -> task-pr-tool -> ci-status-tool -> issue-maintenance-tool -> sprint-pr-tool -> timeline-log-tool`

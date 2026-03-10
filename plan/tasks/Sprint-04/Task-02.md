@@ -15,7 +15,7 @@
 ## Dependencies
 
 - `Sprint-04/Task-01`
-- `Sprint-03/Task-04`
+- `Sprint-03/Task-03`
 
 ## In Scope
 

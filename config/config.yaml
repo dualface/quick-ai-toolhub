@@ -1,5 +1,5 @@
 repo:
-  github_owner: example-owner
+  github_owner: dualface
   github_repo: quick-ai-toolhub
   default_branch: main
 
@@ -9,16 +9,16 @@ database:
 server:
   listen_addr: 127.0.0.1:8080
 
-default_model: gpt-5.4
+default_model: sonnet
 
 agents:
   developer:
-    model: gpt-5.4
+    runner: claude-cli
+    model: opus
     template_file: prompts/agents/developer.md
   qa:
-    model: gpt-5.4
+    runner: claude-cli
     template_file: prompts/agents/qa.md
   reviewer:
-    model: gpt-5.4
+    runner: claude-cli
     template_file: prompts/agents/reviewer.md
-

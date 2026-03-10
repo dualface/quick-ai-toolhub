@@ -32,8 +32,34 @@
 ## 配置约束
 
 - 所有主配置文件统一使用 `.yaml`
-- 不维护“环境变量主配置 + YAML 辅助”的双轨模式
+- 不维护”环境变量主配置 + YAML 辅助”的双轨模式
 - 环境变量最多只用于指定配置文件路径，例如 `CONFIG_FILE`
+
+## 循环打断阈值配置
+
+循环打断阈值在 `config/config.yaml` 中统一配置，作用域为全局所有 task：
+
+```yaml
+loop_breaker:
+  max_total_attempts: 8          # 单个 task 总修复循环上限（含所有阶段）
+  max_qa_fail_count: 3           # QA 连续失败上限
+  max_review_fail_count: 2       # Review 连续打回上限
+  max_ci_fail_count: 3           # CI 连续失败上限
+  no_progress_min_diff_lines: 20 # 无进展判定：相邻两次提交净变更行数低于此值
+```
+
+无进展判定逻辑（**两个条件须同时满足**）：
+
+1. 当前阶段的 `failure_fingerprint` 与上 N 次 attempt 相同（N = 对应阶段的 `max_*_fail_count`）
+2. 相邻两次提交的净变更行数低于 `no_progress_min_diff_lines`，且未引入新文件
+
+失败指纹连续重复但 diff 超阈值（代码改动大但方向不对）→ 不判定为无进展，仍继续直到命中分阶段上限。
+
+约束：
+
+- 所有阈值必须显式配置，不得缺省为 `0`（`0` 等同于禁用，禁止在生产配置中使用）
+- `Task Orchestrator` 在每个阶段结束后读取当前阈值并执行判定
+- 不支持 per-task 或 per-sprint 覆盖；`v1` 统一使用全局阈值
 
 ## GitHub CLI 约束
 
@@ -44,7 +70,7 @@
 
 ## Agent CLI 约束
 
-- `run-agent-tool` 固定使用 `codex_exec`
+- `run-agent-tool` 固定使用 `codex-cli`
 - `run-agent-tool` 必须在目标 task worktree 中执行
 - `run-agent-tool` 必须显式设置权限策略，不能继承用户本机默认权限配置
 - `run-agent-tool` 默认从 `config/config.yaml` 读取 Agent 配置
@@ -53,8 +79,26 @@
 - 手工 bootstrap 时允许 `run-task --yolo`，该模式会向 `codex` 传 `--dangerously-bypass-approvals-and-sandbox`，并跳过 `--sandbox`
 - `developer`、`qa` 默认使用 `workspace_write`
 - `reviewer` 默认使用 `read_only`
-- `codex_exec` 使用 CLI 原生 schema 约束
+- `codex-cli` 使用 CLI 原生 schema 约束
 - 详细命令约定见 `AGENT-CLI-V1.md`
+
+## Agent 运行产物目录规范
+
+每次 Agent 运行创建一个唯一运行目录，规则如下：
+
+- 运行目录统一落在仓库 worktree 内的 `.toolhub/runs` 根目录，格式为：
+  `.toolhub/runs/<sprint_id>/<task_local_id>/<agent_type>/attempt-<nn>/<lens>/<timestamp>-<run_id>/`
+  例如：`.toolhub/runs/Sprint-01/Task-03/developer/attempt-02/default/20260306T120000.000000000Z-runid123/`
+- `developer` 和 `qa` 默认直接在上述目录下落盘
+- `reviewer` 的持久化产物同样归档到上述目录；若底层 runner 为满足只读约束临时使用系统目录中转输出，最终 `runner.log` / `result.json` 仍回写到 `.toolhub/runs`
+- 当前 v1 不定义“省略 `task_id` 的 sprint-reviewer 独立目录”；所有运行产物都按 `task_id` 归档
+- 每个运行目录至少包含以下文件：
+  - `prompt.md`：注入给 Agent 的完整提示
+  - `output-schema.json`：期望的输出结构定义
+  - `runner.log`：Agent 运行原始日志
+  - `result.json`：Agent 结构化输出
+- `artifact_refs.log` 指向该目录下的 `runner.log`
+- `artifact_refs.report` 指向该目录下的 `result.json`
 
 ## Tool I/O Schema
 
@@ -115,16 +159,16 @@ task_projection:
   human_reason: string
 
 finding:
-  reviewer_id: string
+  reviewer_id: string       # 格式：<agent_type>-<lens>-<attempt>，例如 reviewer-correctness-2；Sprint 级：reviewer-architecture-1
   lens: string
-  severity: string
-  confidence: string
+  severity: string          # 允许值：critical | high | medium | low
+  confidence: string        # 允许值：high | medium | low
   category: string
   file_refs: [string]
   summary: string
   evidence: string
   finding_fingerprint: string
-  suggested_action: string
+  suggested_action: string  # reviewer 针对该 finding 的修复建议（自由文本，不做 enum 约束）
 
 pull_request_ref:
   github_pr_number: integer
@@ -167,11 +211,15 @@ response.data:
 
 ### `prepare-worktree-tool`
 
+职责：创建或复用 Sprint Branch、task branch 和对应 worktree。
+
+Sprint Branch 创建时机：`prepare-worktree-tool` 在收到请求时，若 `sprint_branch` 在远端不存在，则从 `default_branch` 的最新代码自动创建并推送；若已存在则直接使用。`Global Leader` 无需单独创建 Sprint Branch。
+
 ```yaml
 request:
   sprint_id: string
   task_id: string
-  sprint_branch: string
+  sprint_branch: string   # 期望的 Sprint Branch 名，不存在时自动从 default_branch 创建
   task_branch: string
   worktree_root?: string
 
@@ -180,14 +228,14 @@ response.data:
   task_branch: string
   base_branch: string
   base_commit_sha: string
-  reused: true | false
+  reused: true | false    # true 表示复用了已存在的 worktree，false 表示新建
 ```
 
 ### `task-state-store-tool`
 
 ```yaml
 request:
-  op: append_event | load_task_projection | load_sprint_projection | update_task_state | update_sprint_state | enqueue_outbox_action | load_pending_outbox_actions
+  op: append_event | load_task_projection | load_sprint_projection | update_task_state | update_sprint_state | enqueue_outbox_action | load_pending_outbox_actions | append_review_findings
   payload: object
 
 payload.append_event:
@@ -245,6 +293,12 @@ payload.enqueue_outbox_action:
 payload.load_pending_outbox_actions:
   limit: integer
 
+payload.append_review_findings:
+  findings: [finding]
+  review_event_id: string
+  task_id: string      # 必填；当前 review findings 必须关联具体 Task
+  sprint_id: string
+
 response.data:
   append_event:
     event_id: string
@@ -260,6 +314,9 @@ response.data:
     deduplicated: true | false
   load_pending_outbox_actions:
     actions: [object]
+  append_review_findings:
+    stored_count: integer
+    deduplicated_count: integer
 ```
 
 ### `github-sync-tool`
@@ -302,7 +359,7 @@ response.data:
 ```yaml
 request:
   agent_type: developer | qa | reviewer
-  task_id: string
+  task_id: string         # 必填，格式为 Sprint-<n>/Task-<n>
   attempt: integer
   lens?: string
   model?: string
@@ -315,7 +372,7 @@ request:
     artifact_refs?: artifact_refs
 
 response.data:
-  runner: codex_exec
+  runner: codex-cli
   status: string
   summary: string
   next_action: string
@@ -325,53 +382,93 @@ response.data:
   findings?: [finding]
 ```
 
-### `review-aggregation-tool`
+权限策略说明：
+
+- `agent_type` 隐含权限策略：`developer` / `qa` 使用 `workspace_write`，`reviewer` 使用 `read_only`
+- `run-agent-tool` 内部根据 `agent_type` 自动映射为 `codex` 的 `--sandbox` 参数，调用方不需要额外传权限字段
+- `reviewer` 通过 `--add-dir <worktree_path>` 访问 worktree，读操作只读，不写入 worktree
+- 当前 v1 不支持省略 `task_id`、仅凭 `sprint_id` 触发 reviewer 运行
+
+### `review-result-tool`
 
 ```yaml
 request:
-  task_id: string
-  review_results:
-    - reviewer_id: string
-      lens: string
-      status: string
-      findings: [finding]
+  task_id: string     # 必填，格式为 Sprint-<n>/Task-<n>
+  sprint_id?: string  # 可选上下文；未传时由 task_id 推断
+  review_result:
+    reviewer_id: string
+    lens: string
+    status: string
+    findings: [finding]
 
 response.data:
-  aggregated_findings: [finding]
+  review_findings: [finding]
   decision: pass | request_changes | awaiting_human
   summary: string
   has_critical_finding: true | false
   has_blocking_finding: true | false
-  has_conflict: true | false
   has_reviewer_escalation: true | false
-  needs_supplemental_review: true | false
-  supplemental_review?:
-    required: true | false
-    candidate_lenses: [string]
-    reason: string
 ```
 
 职责边界：
 
-- reviewer 结果的语义聚合可以由 LLM 产出
-- `review-aggregation-tool` 负责对该聚合结果做 schema 校验、字段归一、枚举校验和决策优先级收口
+- `review-result-tool` 负责对单个 reviewer 结果做 schema 校验、字段归一、枚举校验和决策优先级收口
 - 调用方消费的是工具输出的稳定 contract，而不是原始 LLM 文本
+
+标准 reviewer lens：
+
+- `correctness`：默认 task reviewer lens；未命中特殊条件时使用
+- `security`：当任务涉及安全边界、认证授权、密钥、依赖升级或外部输入处理时使用
+- `architecture`：当任务主要修改公共接口、状态机、跨模块编排或存储 contract 时使用
+- `test`：当任务主要补测试、修测试基础设施或验证策略时使用
+
+单 reviewer 选择规则：
+
+- task 级审查默认使用 `correctness`
+- 若任务主要风险与上述更专门场景匹配，可切换为一个更合适的单 lens，但一次只能选择一个
+- sprint 级审查默认使用 `architecture`
+
+允许的 reviewer `status` 规范值：
+
+- `pass`：review 通过，无 findings
+- `request_changes`：review 要求修复，必须附带 findings
+- `awaiting_human`：review 无法自动收口，要求人工裁决；可附带 findings
+
+`review-result-tool` 到 orchestrator 事件的收口映射：
+
+- `decision=pass` -> `review_passed`
+- `decision=request_changes` -> `review_changes_requested`
+- `decision=awaiting_human` -> `review_awaits_human`
+- `ok=false` 且 `error.code=invalid_request` -> 视为当前 review attempt 失败，返回 `Developer` 修正输入/输出 contract
+- 工具输出的 `decision` 是唯一 machine-readable 流程输入；orchestrator 不再直接解析 reviewer 原始 `status`
 
 约束：
 
 - `summary` 只做人类可读摘要；调用方不得解析 `summary` 文本代替结构化字段做流程分支
-- `review_results[].reviewer_id` 必须非空且在同一请求内唯一
-- `review_results[].lens` 必须非空且在同一请求内唯一
-- `review_results[].status` 必须属于允许的 reviewer 结果枚举或合法别名；未知状态必须返回 `invalid_request`
-- 任意带 `with_findings` 语义的 reviewer `status` 必须携带至少一条 finding
+- `task_id` 必须符合 `Sprint-<n>/Task-<n>` 格式；当前 v1 不支持省略 `task_id` 的 review contract
+- `review_result.reviewer_id` 必须非空
+- `review_result.lens` 必须属于允许的 reviewer lens 枚举
+- `review_result.status` 只允许 `pass`、`request_changes`、`awaiting_human`；其他值一律返回 `invalid_request`
+- `request_changes` 必须携带至少一条 finding
 - 每条 finding 必须保留非空 `file_refs`
+- `has_critical_finding` / `has_blocking_finding` 的判定规则：
+  - `has_critical_finding=true`：任一 finding 的 `severity=critical`
+  - `has_blocking_finding=true`：任一 finding 的 `severity` 为 `critical` 或 `high`
+  - 两者并非互斥：`critical` finding 同时触发两个 flag
 - 最终 `decision` 与结构化 signals 的优先级必须满足：
   - 发现无效输入时，工具返回 `ok: false` / `error.code=invalid_request`
-  - `has_conflict=true` 或 `has_reviewer_escalation=true` 时，`decision=awaiting_human`
+  - `has_reviewer_escalation=true` 时，`decision=awaiting_human`
   - 否则若 `has_critical_finding=true` 或 `has_blocking_finding=true`，`decision=request_changes`
-  - 否则若 `needs_supplemental_review=true`，`decision=pass`，并通过 `supplemental_review` 结构化返回继续验证所需信息
+  - 否则若存在普通 findings（`severity=medium` 或 `low`），`decision=request_changes`
   - 其他情况返回 `decision=pass`
-- 当 `has_conflict=true` 与 `has_blocking_finding=true` 并存时，最终 `decision` 仍必须按冲突优先级返回 `awaiting_human`，但 `has_blocking_finding` 不得被清空
+
+findings 流转路径：
+
+- `run-agent-tool` 从 reviewer 输出中提取 `findings: [finding]` 并原样返回给调用方
+- 调用方将 `findings` 作为 `review_result.findings` 传入 `review-result-tool`
+- `review-result-tool` 对每条 finding 做 schema 校验和枚举校验，返回归一后的 `review_findings: [finding]`
+- 调用方（`Task Orchestrator` 或 `Global Leader`）将归一后的 findings 写入 `review_findings` 表（通过 `task-state-store-tool`）
+- findings 写入时以 `(task_id, review_event_id, reviewer_id, finding_fingerprint)` 去重
 
 ### `task-pr-tool`
 
@@ -424,6 +521,21 @@ response.data:
   overall_status: pending | success | failure
   overall_conclusion?: string
 ```
+
+三个操作的使用时机：
+
+- `list_runs_for_pr`：调试或人工复盘时，列出 PR 关联的全部 CI run；一般不在自动推进主流程中轮询
+- `get_latest_required_status`：主流程轮询使用，Task Orchestrator 等待 CI 完成时调用；返回合并所需的整体 CI 结论
+- `sync_ci_projection`：在轮询前可调用一次，将 GitHub 最新 CI 状态同步写入本地 `ci_runs` 投影；主要由定时对账 worker 调用，也可在轮询前显式触发一次以降低脏读概率
+
+Task PR 自动合并时序：
+
+1. `review-result-tool` 返回 `decision=pass` 后，`Task Orchestrator` 调用 `task-pr-tool(create_or_update_task_pr)` 创建或更新 Task PR
+2. PR 创建后，通过 `outbox_actions` 异步执行 `task-pr-tool(enable_auto_merge)`，启用 GitHub 自动合并
+3. `Task Orchestrator` 可选先调用 `ci-status-tool(sync_ci_projection)` 刷新本地投影，再轮询 `ci-status-tool(get_latest_required_status)` 等待 CI 完成
+4. CI 通过后，GitHub 平台根据已启用的自动合并规则自动执行合并
+5. 合并完成由 webhook（`pull_request.closed` + `merged=true`）触发，写入 `auto_merge_succeeded` 事件
+6. `Task Orchestrator` 通过 `task-pr-tool(refresh_merge_status)` 确认合并状态，再将 Task 标记为 `done`
 
 ### `issue-maintenance-tool`
 
@@ -508,7 +620,11 @@ payload.append_human_handoff:
   entity_type: sprint | task
   entity_id: string
   reason: string
-  suggested_action: string
+  suggested_action: fix_and_resume | close_and_skip | manual_merge | investigate
+  # fix_and_resume: 人工修复后继续自动推进
+  # close_and_skip: 跳过该 task/sprint 不再自动推进
+  # manual_merge:   人工处理合并相关外部条件
+  # investigate:    人工调查后再决定下一步动作
 
 response.data:
   log_path: string

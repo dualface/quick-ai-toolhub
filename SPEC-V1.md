@@ -42,7 +42,7 @@
 - 保存结构化事件
 - 保存 `Task` / `Sprint` 当前运行时状态投影
 - 保存 attempt、failure fingerprint、无进展判断输入
-- 保存 worktree、branch、PR、CI、review 聚合等执行元数据
+- 保存 worktree、branch、PR、CI、review 结果等执行元数据
 - 支撑重启恢复、幂等去重和状态机推进
 
 不负责：
@@ -235,6 +235,26 @@ Task-01
 - GitHub issue number 只作为外部平台引用，不作为业务顺序依据
 - `SQLite` 中必须同时保存业务编号和 GitHub issue number
 
+### Issue 编号解析算法
+
+`Global Leader` 按以下顺序解析 issue 编号：
+
+1. 从 issue **标题**中提取：
+   - Sprint issue 标题匹配正则 `^\[Sprint-(\d+)\]`
+   - Task issue 标题匹配正则 `^\[Sprint-(\d+)\]\[Task-(\d+)\]`
+2. 从 issue **正文**的对应 section 提取：
+   - `## Sprint ID` 段落下的值，例如 `Sprint-01`
+   - `## Task ID` 段落下的值，例如 `Task-01`（仅 task issue）
+3. 对比两处提取结果：如果标题与正文的编号不一致，视为无效输入，停止调度并进入人工处理
+4. 从编号中取数值部分生成 `sequence_no`：`Sprint-01` -> `1`，`Task-03` -> `3`
+
+解析错误处理：
+
+- 标题格式不匹配（未包含 `[Sprint-XX]`）：视为无效 issue，跳过并记录警告
+- 正文缺少 `## Sprint ID` 或 `## Task ID` section：视为无效输入，进入人工处理
+- 标题与正文编号不一致：视为无效输入，进入人工处理
+- 同一 `Sprint` 下存在重复 `Task-XX` 编号：视为无效输入，进入人工处理
+
 ## 最小标签规范
 
 `v1` 只使用少量标签，避免把运行时状态全部映射到 GitHub labels。
@@ -253,6 +273,15 @@ Task-01
 - `kind/sprint` 与 `kind/task` 互斥
 - `needs-human` 只用于提示人类需要介入，不作为状态机真源
 - `qa_failed`、`review_failed`、`ci_failed`、`ready_to_merge` 等运行时状态不得依赖 labels 表达
+
+### `needs_human` 与 `awaiting_human` 的关系
+
+`needs_human` 是本地 SQLite 字段（`tasks.needs_human` / `sprints.needs_human`）与 GitHub `needs-human` 标签的统一体现，规则如下：
+
+- 进入 `awaiting_human`、`blocked`、`escalated` 时：必须同时设置本地 `needs_human=true`、写入 `human_reason`，并在对应 GitHub issue 上添加 `needs-human` 标签
+- 从 `awaiting_human` 恢复到任意自动推进状态时：必须清除本地 `needs_human=false`，并移除 GitHub `needs-human` 标签
+- 在 `dev_in_progress`、`qa_in_progress` 等中间态下，`needs_human` 必须为 `false`
+- `needs_human=true` 不等价于 `awaiting_human`：`blocked` 和 `escalated` 也会设置 `needs_human=true`，但这些是终态，不能通过恢复事件自动继续
 
 ## GitHub 与 SQLite 的职责边界
 
@@ -369,7 +398,7 @@ Task-01
 | `acceptance_criteria_json`    | `TEXT`    | NOT NULL             | 验收条件列表                        |
 | `out_of_scope_json`           | `TEXT`    | NOT NULL             | 非目标列表                          |
 | `status`                      | `TEXT`    | NOT NULL             | 对应 README 中的 Task 状态机        |
-| `attempt_total`               | `INTEGER` | NOT NULL DEFAULT `0` | 总循环次数                          |
+| `attempt_total`               | `INTEGER` | NOT NULL DEFAULT `0` | 总修复循环次数；每次重新进入 `dev_in_progress` 进行一轮修复时加 1 |
 | `qa_fail_count`               | `INTEGER` | NOT NULL DEFAULT `0` | QA 连续失败计数                     |
 | `review_fail_count`           | `INTEGER` | NOT NULL DEFAULT `0` | Review 连续失败计数                 |
 | `ci_fail_count`               | `INTEGER` | NOT NULL DEFAULT `0` | CI 连续失败计数                     |
@@ -435,33 +464,47 @@ Task-01
 - `events` 为 append-only 表，禁止更新和删除
 - 同一外部副作用或 webhook 重放必须复用相同 `idempotency_key`
 
+`idempotency_key` 生成规范：
+
+- task 阶段事件：`<task_id>:<event_type>:<attempt>`，例如 `Sprint-01/Task-03:qa_failed:2`
+- sprint 事件：`<sprint_id>:<event_type>`，例如 `Sprint-01:sprint_reviewing`
+- outbox 动作：`outbox:<action_type>:<entity_id>:<attempt>`，例如 `outbox:create_pr:Sprint-01/Task-03:1`
+- webhook 事件：`webhook:<delivery_id>`
+- 不同来源（webhook、reconciler、leader）如果表达同一外部事实，必须产生相同的 `idempotency_key`
+
 ### `review_findings`
 
-保存结构化 reviewer finding，便于聚合和去重。
+保存结构化 reviewer finding，便于单 reviewer 审查结果落地、后续修复追踪和人工复盘。
 
 关键字段：
 
 | 字段                  | 类型   | 约束                    | 说明                                                            |
 | --------------------- | ------ | ----------------------- | --------------------------------------------------------------- |
 | `finding_id`          | `TEXT` | PK                      | 本地 finding ID                                                 |
-| `task_id`             | `TEXT` | NOT NULL, FK            | 所属 task                                                       |
-| `review_event_id`     | `TEXT` | NOT NULL, FK            | 来源事件，一般指向 `review_aggregated` 或 reviewer 原始结果事件 |
+| `task_id`             | `TEXT` | NULL, FK                | 所属 task；Task 级 reviewer 必填，Sprint 级 reviewer 为 NULL    |
+| `review_event_id`     | `TEXT` | NOT NULL, FK            | 来源事件，一般指向 `review_completed` 或 reviewer 原始结果事件 |
 | `reviewer_id`         | `TEXT` | NOT NULL                | reviewer 会话标识                                               |
 | `lens`                | `TEXT` | NOT NULL                | `correctness` / `test` / `architecture` / `security`            |
-| `severity`            | `TEXT` | NOT NULL                | 严重级别                                                        |
-| `confidence`          | `TEXT` | NOT NULL                | 置信度                                                          |
+| `severity`            | `TEXT` | NOT NULL                | 严重级别；允许值：`critical` / `high` / `medium` / `low`       |
+| `confidence`          | `TEXT` | NOT NULL                | 置信度；允许值：`high` / `medium` / `low`                      |
 | `category`            | `TEXT` | NOT NULL                | 问题类别                                                        |
 | `file_refs_json`      | `TEXT` | NOT NULL                | 文件引用列表                                                    |
 | `summary`             | `TEXT` | NOT NULL                | finding 摘要                                                    |
 | `evidence`            | `TEXT` | NOT NULL                | 证据                                                            |
 | `finding_fingerprint` | `TEXT` | NOT NULL                | 去重指纹                                                        |
 | `suggested_action`    | `TEXT` | NOT NULL                | 建议动作                                                        |
-| `aggregate_status`    | `TEXT` | NOT NULL DEFAULT `open` | `open` / `accepted` / `dismissed` / `fixed`                     |
+| `aggregate_status`    | `TEXT` | NOT NULL DEFAULT `open` | finding 处理状态；允许值：`open` / `accepted` / `dismissed` / `fixed`            |
 | `created_at`          | `TEXT` | NOT NULL                | 写入时间                                                        |
 
 建议唯一索引：
 
-- `UNIQUE (task_id, review_event_id, reviewer_id, finding_fingerprint)`
+- `UNIQUE (review_event_id, reviewer_id, finding_fingerprint)`
+
+约束补充：
+
+- 每个 `review_event_id` 对应单个 reviewer 结果
+- `finding_fingerprint` 在单个 `review_event_id` 内必须稳定唯一，供修复追踪和去重使用
+- Task 级 reviewer：`task_id` 必填；Sprint 级 reviewer：`task_id` 为 NULL，通过 `review_event_id` 关联 sprint 事件
 
 ### `pull_requests`
 
@@ -523,7 +566,7 @@ Task-01
 | `action_id`            | `TEXT`    | PK                   | 本地动作 ID                                                              |
 | `entity_type`          | `TEXT`    | NOT NULL             | `task` / `sprint` / `system`                                             |
 | `entity_id`            | `TEXT`    | NOT NULL             | 对应实体 ID                                                              |
-| `action_type`          | `TEXT`    | NOT NULL             | 例如 `comment_issue` / `close_issue` / `create_pr` / `enable_auto_merge` |
+| `action_type`          | `TEXT`    | NOT NULL             | 允许值见下表                                                             |
 | `github_target_type`   | `TEXT`    | NOT NULL             | `issue` / `pull_request` / `label`                                       |
 | `github_target_number` | `INTEGER` | NULL                 | 目标 issue 或 PR 编号                                                    |
 | `idempotency_key`      | `TEXT`    | NOT NULL, UNIQUE     | 外部动作幂等键                                                           |
@@ -535,6 +578,21 @@ Task-01
 | `created_at`           | `TEXT`    | NOT NULL             | 创建时间                                                                 |
 | `updated_at`           | `TEXT`    | NOT NULL             | 更新时间                                                                 |
 | `completed_at`         | `TEXT`    | NULL                 | 完成时间                                                                 |
+
+`action_type` 允许值：
+
+| action_type                   | 说明                             |
+| ----------------------------- | -------------------------------- |
+| `create_task_pr`              | 创建 Task PR                     |
+| `update_task_pr`              | 更新 Task PR 标题或正文          |
+| `enable_task_pr_auto_merge`   | 为 Task PR 启用自动合并          |
+| `create_sprint_pr`            | 创建 Sprint PR                   |
+| `comment_task_issue`          | 在 Task issue 追加评论           |
+| `comment_sprint_issue`        | 在 Sprint issue 追加评论         |
+| `set_needs_human`             | 为 issue 添加 `needs-human` 标签 |
+| `clear_needs_human`           | 从 issue 移除 `needs-human` 标签 |
+| `close_task_issue`            | 关闭 Task issue                  |
+| `close_sprint_issue`          | 关闭 Sprint issue                |
 
 ### `sync_state`
 
@@ -581,7 +639,8 @@ Task-01
 2. Webhook 增量更新
    - GitHub 推送 issue、PR、CI 相关 webhook 后，先写 `events`
    - 再在单个 SQLite 事务中更新对应投影表
-   - 如果 webhook 重复到达，按 `idempotency_key` 去重
+   - 如果 webhook 重复到达（相同 `delivery_id`），按 `idempotency_key` 静默去重，不重新执行投影更新
+   - 如果 webhook 数据与本地投影存在实质冲突（例如 GitHub 返回的状态早于本地已记录状态），必须写入对账异常事件，不得静默覆盖；冲突事件由定时对账逻辑最终裁定
 
 3. 定时对账
    - 每 `5` 分钟执行一次轻量全量对账
@@ -733,6 +792,22 @@ Task-01
 - 使用 GitHub issue dependencies 能力维护显式阻塞关系
 - 使用 GitHub Issues API 读取 issue 基础字段、标签、状态、评论
 - 不依赖 Markdown tasklist 解析来建立调度关系
+
+## Sprint reviewer findings 处理规则
+
+`Sprint` 进入 `sprint_reviewing` 后，`Global Leader` 必须按以下规则处理单个 reviewer 的结果：
+
+1. 调用 `review-result-tool` 对 reviewer 结果执行 schema 校验、字段归一和决策收口，得到结构化 `decision`
+2. 按 `decision` 决定后续状态：
+   - `decision=pass`（无阻塞 finding）：直接进入 `Sprint PR` 创建流程，Sprint 状态转移至 `sprint_pr_open`
+   - `decision=request_changes` 且 `has_critical_finding=true` 或 `has_blocking_finding=true`：Sprint 进入 `blocked`，附带 findings 摘要，禁止创建 `Sprint PR`
+   - `decision=request_changes` 但无 `critical` / `blocking` finding：Sprint 进入 `awaiting_human`，由人工决定是否可以接受并继续
+   - `decision=awaiting_human` 或 `has_reviewer_escalation=true`：Sprint 进入 `awaiting_human`，产出 handoff 摘要
+3. Sprint reviewer 使用 `review-result-tool` 收口，与 task 级 reviewer 遵守完全相同的 `decision` 优先级规则
+4. 审查结论必须以结构化摘要附加到 `Sprint PR` body 中（包括 `has_critical_finding`、`has_blocking_finding`、`has_reviewer_escalation` 三个结构化字段）
+5. Sprint reviewer 默认使用 `architecture` lens，具体 lens 由 `Global Leader` 在调用 `run-agent-tool` 时显式传入
+6. 当前 v1 中 `run-agent-tool` 和 `review-result-tool` 调用都必须显式传 `task_id`；不支持省略 `task_id`、仅凭 `sprint_id` 定位 reviewer 运行
+7. reviewer findings 写入 `review_findings` 表时必须关联 `task_id`，并继续使用 `review_event_id` 标识对应 review 事件
 
 ## 审计与时间线
 

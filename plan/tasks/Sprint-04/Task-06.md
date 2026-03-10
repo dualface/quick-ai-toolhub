@@ -37,7 +37,8 @@
 
 ## Acceptance Criteria
 
-- 重复失败和无进展能给出一致信号
+- 无进展判定须同时满足两个条件：failure_fingerprint 连续 N 次未改变（N 与对应阶段失败上限一致），且相邻两次提交净变更行数低于 `no_progress_min_diff_lines` 阈值且未引入新文件；缺一不可
+- 重复失败（fingerprint 重复但 diff 超阈值）与无进展（两个条件均满足）输出不同信号，不混用
 - 升级建议可与 orchestrator 当前状态机对接
 - 检测逻辑保持确定性，不依赖模糊启发式
 

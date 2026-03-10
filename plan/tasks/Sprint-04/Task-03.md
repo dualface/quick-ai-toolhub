@@ -1,8 +1,8 @@
-# [Sprint-04][Task-03] 实现 review-aggregation-tool
+# [Sprint-04][Task-03] 实现 review-result-tool
 
 ## Goal
 
-实现纯聚合的 `review-aggregation-tool`，对多个 `Reviewer` 的 findings 完成归一化、去重、置信度提升、冲突识别和统一结论计算。
+实现 `review-result-tool`，对单个 `Reviewer` 的结构化结果做校验、归一和稳定结论计算。
 
 ## Reads
 
@@ -19,11 +19,10 @@
 
 ## In Scope
 
-- finding 归一化与输入校验
-- 按 `finding_fingerprint` 去重
-- 处理多 reviewer 同问题命中时的置信度提升
-- 识别冲突 finding 与补充审查信号
-- 输出结构化聚合结果和摘要
+- reviewer result 归一化与输入校验
+- finding 字段校验与结构化收口
+- 识别 `critical` / `blocking` / `reviewer_escalation`
+- 输出结构化 review 结果和摘要
 
 ## Out of Scope
 
@@ -35,19 +34,18 @@
 
 ## Deliverables
 
-- `review-aggregation-tool` 纯聚合实现
-- findings 聚合与冲突识别测试
+- `review-result-tool` 实现
+- reviewer 结果校验与决策测试
 
 ## Acceptance Criteria
 
-- 聚合行为符合 `README.md` 的 reviewer 并发与聚合规则
+- review 结果收口行为符合 `README.md` 的单 reviewer 审查规则
 - `critical` finding 会明确阻塞
-- 冲突结论和补充审查信号会被识别而不是静默吞掉
-- 调用方无需解析 `summary` 文本，即可通过结构化字段识别 `conflict`、`reviewer_escalation`、`blocking`、`supplemental_review`
-- `decision` 优先级与 `TECH-V1.md` 一致：`conflict/reviewer_escalation` 高于 `blocking`，`blocking` 高于纯 `supplemental_review`
+- 调用方无需解析 `summary` 文本，即可通过结构化字段识别 `reviewer_escalation`、`blocking`
+- `decision` 优先级与 `TECH-V1.md` 一致：`reviewer_escalation` 高于 `blocking`，普通 findings 高于纯 `pass`
 
 ## Notes
 
-- 工具只负责聚合和结论，不直接做流程调度
+- 工具只负责单 reviewer 结果的 contract 收口和结论，不直接做流程调度
 - 该任务优先沉淀纯函数或无副作用接口，便于后续 orchestrator 复用
-- 本任务内需要把公共 tool contract 一并定稿，避免调用方通过解析 `summary` 字符串推断冲突或补充审查信号
+- 本任务内需要把公共 tool contract 一并定稿，避免调用方通过解析 `summary` 字符串推断 reviewer 结论

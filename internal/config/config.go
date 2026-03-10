@@ -45,6 +45,7 @@ type AgentsConfig struct {
 }
 
 type AgentProfile struct {
+	Runner       string `yaml:"runner"`
 	Model        string `yaml:"model"`
 	TemplateFile string `yaml:"template_file"`
 }
@@ -141,6 +142,7 @@ func (c *Config) normalize() {
 }
 
 func (p *AgentProfile) normalize() {
+	p.Runner = strings.TrimSpace(p.Runner)
 	p.Model = strings.TrimSpace(p.Model)
 	p.TemplateFile = strings.TrimSpace(p.TemplateFile)
 }

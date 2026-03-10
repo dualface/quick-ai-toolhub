@@ -33,6 +33,28 @@ func (Parser) Load(planFile, tasksDir string) (*PlanData, error) {
 	return plan, nil
 }
 
+func (Parser) LoadTask(tasksDir, taskID string) (*TaskBrief, *Sprint, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, nil, fmt.Errorf("task id is required")
+	}
+
+	taskBriefs, err := loadTaskBriefs(tasksDir)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	task, ok := taskBriefs[taskID]
+	if !ok {
+		return nil, nil, fmt.Errorf("task %s not found", taskID)
+	}
+
+	return task, &Sprint{
+		ID:     task.SprintID,
+		Source: filepath.ToSlash(tasksDir),
+	}, nil
+}
+
 func parseSprintPlan(path string) ([]*Sprint, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -193,11 +215,18 @@ func validatePlan(plan *PlanData) error {
 func parseSections(lines []string, headingPrefix string) map[string][]string {
 	sections := make(map[string][]string)
 	var current string
+	currentLevel := headingPrefixLevel(headingPrefix)
 	for _, line := range lines {
 		if strings.HasPrefix(line, headingPrefix) {
 			current = strings.TrimSpace(strings.TrimPrefix(line, headingPrefix))
 			sections[current] = nil
 			continue
+		}
+		if current != "" {
+			if level := headingLevel(line); level > 0 && level <= currentLevel {
+				current = ""
+				continue
+			}
 		}
 		if current == "" {
 			continue
@@ -205,6 +234,29 @@ func parseSections(lines []string, headingPrefix string) map[string][]string {
 		sections[current] = append(sections[current], line)
 	}
 	return sections
+}
+
+func headingLevel(line string) int {
+	line = strings.TrimSpace(line)
+	if line == "" || !strings.HasPrefix(line, "#") {
+		return 0
+	}
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	if level >= len(line) || line[level] != ' ' {
+		return 0
+	}
+	return level
+}
+
+func headingPrefixLevel(prefix string) int {
+	level := 0
+	for level < len(prefix) && prefix[level] == '#' {
+		level++
+	}
+	return level
 }
 
 func parseTaskTable(lines []string) ([]TaskSummary, error) {

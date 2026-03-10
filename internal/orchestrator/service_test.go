@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"quick-ai-toolhub/internal/agentrun"
 	"quick-ai-toolhub/internal/store"
@@ -154,8 +153,8 @@ func TestRunTaskCompletesDeveloperQAReviewLoop(t *testing.T) {
 	})
 
 	result, err := service.RunTask(context.Background(), RunTaskOptions{
-		TaskID:         "Sprint-04/Task-02",
-		ReviewerLenses: []string{" Correctness "},
+		TaskID:       "Sprint-04/Task-02",
+		ReviewerLens: " Correctness ",
 	})
 	if err != nil {
 		t.Fatalf("run task: %v", err)
@@ -1315,45 +1314,6 @@ func TestClassifyReviewResultNormalizesNextAction(t *testing.T) {
 	}
 }
 
-func TestAggregateReviewStageResultRequestsSecondaryValidationBeforeHumanHandoff(t *testing.T) {
-	t.Parallel()
-
-	stageResult, needsSecondaryValidation := aggregateReviewStageResult(2, []reviewObservation{
-		{
-			lens: "correctness",
-			result: StageResult{
-				Status:     "pass",
-				Summary:    "possible race condition",
-				NextAction: "open_task_pr",
-			},
-			findings: []agentrun.Finding{
-				{
-					ReviewerID:         "reviewer-correctness",
-					Lens:               "correctness",
-					Severity:           "medium",
-					Confidence:         "low",
-					Category:           "correctness",
-					FileRefs:           []string{"internal/orchestrator/run.go"},
-					Summary:            "possible race on task state",
-					Evidence:           "single reviewer found a low-confidence race",
-					FindingFingerprint: "correctness:orchestrator:possible-race",
-					SuggestedAction:    "run secondary validation before deciding",
-				},
-			},
-		},
-	}, agentrun.ArtifactRefs{}, false)
-
-	if !needsSecondaryValidation {
-		t.Fatalf("expected low-confidence single-review finding to request secondary validation, got %+v", stageResult)
-	}
-	if stageResult.Status != "blocked" || stageResult.NextAction != "await_human" {
-		t.Fatalf("unexpected preliminary stage result: %+v", stageResult)
-	}
-	if stageResult.FailureFingerprint != "correctness:orchestrator:possible-race" {
-		t.Fatalf("unexpected failure fingerprint: %+v", stageResult)
-	}
-}
-
 func TestPersistReviewFindingsRejectsInvalidFindingContract(t *testing.T) {
 	t.Parallel()
 
@@ -1671,34 +1631,28 @@ func TestHandleQAPassAwaitHumanBlocksTask(t *testing.T) {
 	assertOrchestratorEventTypes(t, storeService, []string{eventTaskBlocked})
 }
 
-func TestNormalizedReviewerLenses(t *testing.T) {
+func TestNormalizedReviewerLens(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name    string
-		input   []string
-		want    []string
+		input   string
+		want    string
 		wantErr string
 	}{
 		{
-			name:  "default lens",
-			input: nil,
-			want:  []string{"correctness"},
+			name: "default lens",
+			want: "correctness",
 		},
 		{
 			name:  "canonicalizes supported lenses",
-			input: []string{" Correctness ", "TEST"},
-			want:  []string{"correctness", "test"},
+			input: " Correctness ",
+			want:  "correctness",
 		},
 		{
 			name:    "rejects invalid lens",
-			input:   []string{"ops"},
+			input:   "ops",
 			wantErr: `invalid reviewer lens "ops"`,
-		},
-		{
-			name:    "rejects duplicate lens after normalization",
-			input:   []string{"Correctness", " correctness "},
-			wantErr: `duplicate reviewer lens "correctness"`,
 		},
 	}
 
@@ -1707,7 +1661,7 @@ func TestNormalizedReviewerLenses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := normalizedReviewerLenses(tc.input)
+			got, err := normalizedReviewerLens(tc.input)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
@@ -1715,15 +1669,10 @@ func TestNormalizedReviewerLenses(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("normalized reviewer lenses: %v", err)
+				t.Fatalf("normalized reviewer lens: %v", err)
 			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("unexpected lens count: got %v want %v", got, tc.want)
-			}
-			for index := range tc.want {
-				if got[index] != tc.want[index] {
-					t.Fatalf("unexpected lens at %d: got %q want %q", index, got[index], tc.want[index])
-				}
+			if got != tc.want {
+				t.Fatalf("unexpected lens: got %q want %q", got, tc.want)
 			}
 		})
 	}
@@ -1807,7 +1756,7 @@ func TestRunReviewStageRejectsBlockingDecisionWithoutFindings(t *testing.T) {
 				AgentRunner: runner,
 			})
 
-			result, _, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, []string{"correctness"}, artifactRefsFor("qa-02"))
+			result, _, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", artifactRefsFor("qa-02"))
 			if err != nil {
 				t.Fatalf("run review stage: %v", err)
 			}
@@ -1921,7 +1870,7 @@ func TestRunReviewStageRejectsInvalidFindingEnums(t *testing.T) {
 				AgentRunner: runner,
 			})
 
-			result, _, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, []string{"correctness"}, artifactRefsFor("qa-02"))
+			result, _, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", artifactRefsFor("qa-02"))
 			if err != nil {
 				t.Fatalf("run review stage: %v", err)
 			}
@@ -2011,120 +1960,7 @@ func TestHandleDeveloperFailureMarksBlockedTaskForHumanHandoff(t *testing.T) {
 	assertOrchestratorEventTypes(t, storeService, []string{eventDeveloperBlocked})
 }
 
-func TestRunReviewStageReturnsToDeveloperOnPassWithBlockingFinding(t *testing.T) {
-	t.Parallel()
-
-	storeService := openOrchestratorTestStore(t)
-	worktreePath := t.TempDir()
-	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
-		SprintID:          "Sprint-04",
-		SequenceNo:        4,
-		GitHubIssueNumber: 401,
-		Status:            "in_progress",
-	})
-	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
-		TaskID:                  "Sprint-04/Task-02",
-		SprintID:                "Sprint-04",
-		TaskLocalID:             "Task-02",
-		SequenceNo:              2,
-		GitHubIssueNumber:       402,
-		ParentGitHubIssueNumber: 401,
-		Status:                  "review_in_progress",
-		AttemptTotal:            2,
-		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
-		WorktreePath:            &worktreePath,
-	})
-
-	db, err := storeService.DB()
-	if err != nil {
-		t.Fatalf("store db: %v", err)
-	}
-	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
-	if err != nil {
-		t.Fatalf("load task runtime: %v", err)
-	}
-
-	findingRefs := artifactRefsFor("review-pass-finding-02")
-	runner := &fakeAgentRunner{
-		t: t,
-		steps: []fakeAgentStep{
-			{
-				agentType: agentrun.AgentReviewer,
-				attempt:   2,
-				lens:      "correctness",
-				result: agentrun.Result{
-					Status:       "pass",
-					Summary:      "correctness review passed",
-					NextAction:   "open_task_pr",
-					ArtifactRefs: artifactRefsFor("review-pass-no-findings-02"),
-				},
-			},
-			{
-				agentType: agentrun.AgentReviewer,
-				attempt:   2,
-				lens:      "test",
-				result: agentrun.Result{
-					Status:       "pass",
-					Summary:      "tests mostly pass but found a blocking regression gap",
-					NextAction:   "open_task_pr",
-					ArtifactRefs: findingRefs,
-					Findings: []agentrun.Finding{
-						{
-							ReviewerID:         "reviewer-test",
-							Lens:               "test",
-							Severity:           "high",
-							Confidence:         "high",
-							Category:           "coverage",
-							FileRefs:           []string{"internal/orchestrator/service_test.go"},
-							Summary:            "missing regression test for blocking review aggregation",
-							Evidence:           "pass result still allows pr_open without a regression test covering blocking findings",
-							FindingFingerprint: "test:orchestrator:blocking-pass-review-gap",
-							SuggestedAction:    "add a regression test before opening the task PR",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	service := New(Dependencies{
-		Store:       storeService,
-		AgentRunner: runner,
-	})
-
-	stageResult, rawFindings, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, []string{"correctness", "test"}, artifactRefsFor("qa-02"))
-	if err != nil {
-		t.Fatalf("run review stage: %v", err)
-	}
-	runner.assertExhausted(t)
-
-	if stageResult.Status != "needs_changes" || stageResult.NextAction != "return_to_developer" {
-		t.Fatalf("expected blocking finding to return to developer, got %+v", stageResult)
-	}
-	if stageResult.ArtifactRefs.Report != findingRefs.Report {
-		t.Fatalf("expected finding-producing reviewer refs to be selected, got %+v", stageResult.ArtifactRefs)
-	}
-	if len(stageResult.Findings) != 1 || stageResult.Findings[0].Severity != "high" {
-		t.Fatalf("expected one aggregated high-severity finding, got %+v", stageResult.Findings)
-	}
-	if len(rawFindings) != 1 {
-		t.Fatalf("expected one raw finding for persistence, got %+v", rawFindings)
-	}
-
-	stageResult, updatedSnapshot, err := service.handleReviewResult(context.Background(), snapshot, stageResult, rawFindings)
-	if err != nil {
-		t.Fatalf("handle review result: %v", err)
-	}
-
-	if updatedSnapshot.Status != "review_failed" || stageResult.TaskStatus != "review_failed" {
-		t.Fatalf("expected blocking finding to persist review_failed, got snapshot=%+v result=%+v", updatedSnapshot, stageResult)
-	}
-	if got := countReviewFindings(t, storeService, "Sprint-04/Task-02"); got != 1 {
-		t.Fatalf("expected one persisted raw review finding, got %d", got)
-	}
-}
-
-func TestRunReviewStagePersistsReviewerAttributionAndHighestSeverity(t *testing.T) {
+func TestRunReviewStageDedupesDuplicateFindingsFromSingleReviewer(t *testing.T) {
 	t.Parallel()
 
 	storeService := openOrchestratorTestStore(t)
@@ -2165,9 +2001,9 @@ func TestRunReviewStagePersistsReviewerAttributionAndHighestSeverity(t *testing.
 				attempt:   3,
 				lens:      "correctness",
 				result: agentrun.Result{
-					Status:       "pass",
-					Summary:      "correctness review passed",
-					NextAction:   "open_task_pr",
+					Status:       "needs_changes",
+					Summary:      "correctness review found a blocking issue",
+					NextAction:   "return_to_developer",
 					ArtifactRefs: artifactRefsFor("review-correctness-03"),
 					Findings: []agentrun.Finding{
 						{
@@ -2177,35 +2013,22 @@ func TestRunReviewStagePersistsReviewerAttributionAndHighestSeverity(t *testing.
 							Confidence:         "low",
 							Category:           "correctness",
 							FileRefs:           []string{"internal/orchestrator/run.go"},
-							Summary:            "review aggregation can miss blocking consensus",
-							Evidence:           "pass reviewers can still point at the same blocking issue",
-							FindingFingerprint: "review:orchestrator:blocking-consensus",
-							SuggestedAction:    "aggregate duplicate reviewer findings before opening the task PR",
+							Summary:            "review stage should dedupe duplicate findings",
+							Evidence:           "the reviewer reported the same fingerprint twice",
+							FindingFingerprint: "review:orchestrator:duplicate-finding",
+							SuggestedAction:    "keep the strongest duplicate finding",
 						},
-					},
-				},
-			},
-			{
-				agentType: agentrun.AgentReviewer,
-				attempt:   3,
-				lens:      "architecture",
-				result: agentrun.Result{
-					Status:       "pass",
-					Summary:      "architecture review passed",
-					NextAction:   "open_task_pr",
-					ArtifactRefs: artifactRefsFor("review-architecture-03"),
-					Findings: []agentrun.Finding{
 						{
-							ReviewerID:         "reviewer-architecture",
-							Lens:               "architecture",
+							ReviewerID:         "reviewer-correctness",
+							Lens:               "correctness",
 							Severity:           "high",
 							Confidence:         "medium",
-							Category:           "architecture",
-							FileRefs:           []string{"internal/orchestrator/run.go"},
-							Summary:            "review aggregation can miss blocking consensus",
-							Evidence:           "a second reviewer hit the same review fingerprint with a higher severity assessment",
-							FindingFingerprint: "review:orchestrator:blocking-consensus",
-							SuggestedAction:    "persist each reviewer finding before collapsing the aggregate",
+							Category:           "correctness",
+							FileRefs:           []string{"internal/orchestrator/run.go", "internal/orchestrator/service.go"},
+							Summary:            "review stage should dedupe duplicate findings",
+							Evidence:           "the duplicate carries stronger severity and confidence",
+							FindingFingerprint: "review:orchestrator:duplicate-finding",
+							SuggestedAction:    "keep the strongest duplicate finding",
 						},
 					},
 				},
@@ -2218,23 +2041,23 @@ func TestRunReviewStagePersistsReviewerAttributionAndHighestSeverity(t *testing.
 		AgentRunner: runner,
 	})
 
-	stageResult, rawFindings, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, []string{"correctness", "architecture"}, artifactRefsFor("qa-03"))
+	stageResult, rawFindings, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", artifactRefsFor("qa-03"))
 	if err != nil {
 		t.Fatalf("run review stage: %v", err)
 	}
 	runner.assertExhausted(t)
 
 	if stageResult.Status != "needs_changes" || stageResult.NextAction != "return_to_developer" {
-		t.Fatalf("expected duplicate fingerprint hits to block the PR path, got %+v", stageResult)
+		t.Fatalf("expected reviewer decision to be preserved, got %+v", stageResult)
 	}
 	if len(stageResult.Findings) != 1 {
-		t.Fatalf("expected duplicate fingerprints to collapse into one aggregate, got %+v", stageResult.Findings)
+		t.Fatalf("expected duplicate findings to collapse into one entry, got %+v", stageResult.Findings)
 	}
-	if stageResult.Findings[0].Severity != "high" || stageResult.Findings[0].Confidence != "high" {
-		t.Fatalf("expected aggregate to keep highest severity and promoted confidence, got %+v", stageResult.Findings[0])
+	if stageResult.Findings[0].Severity != "high" || stageResult.Findings[0].Confidence != "medium" {
+		t.Fatalf("expected dedupe to keep strongest severity/confidence from the same reviewer, got %+v", stageResult.Findings[0])
 	}
-	if len(rawFindings) != 2 {
-		t.Fatalf("expected both reviewer findings to remain available for persistence, got %+v", rawFindings)
+	if len(rawFindings) != 1 {
+		t.Fatalf("expected deduped findings to drive persistence, got %+v", rawFindings)
 	}
 
 	stageResult, updatedSnapshot, err := service.handleReviewResult(context.Background(), snapshot, stageResult, rawFindings)
@@ -2243,25 +2066,18 @@ func TestRunReviewStagePersistsReviewerAttributionAndHighestSeverity(t *testing.
 	}
 
 	if updatedSnapshot.Status != "review_failed" || stageResult.TaskStatus != "review_failed" {
-		t.Fatalf("expected aggregated blocking finding to land on review_failed, got snapshot=%+v result=%+v", updatedSnapshot, stageResult)
+		t.Fatalf("expected reviewer finding to land on review_failed, got snapshot=%+v result=%+v", updatedSnapshot, stageResult)
 	}
-	if got := countReviewFindings(t, storeService, "Sprint-04/Task-02"); got != 2 {
-		t.Fatalf("expected both reviewers' raw findings to persist, got %d", got)
+	if got := countReviewFindings(t, storeService, "Sprint-04/Task-02"); got != 1 {
+		t.Fatalf("expected one persisted review finding after dedupe, got %d", got)
 	}
 
 	persisted := loadPersistedReviewFindings(t, storeService, "Sprint-04/Task-02")
-	if len(persisted) != 2 {
+	if len(persisted) != 1 {
 		t.Fatalf("unexpected persisted review findings: %+v", persisted)
 	}
-	gotByReviewer := make(map[string]persistedReviewFindingRow, len(persisted))
-	for _, finding := range persisted {
-		gotByReviewer[finding.ReviewerID] = finding
-	}
-	if gotByReviewer["reviewer-correctness"].Severity != "medium" {
-		t.Fatalf("expected correctness reviewer severity to remain medium, got %+v", gotByReviewer["reviewer-correctness"])
-	}
-	if gotByReviewer["reviewer-architecture"].Severity != "high" {
-		t.Fatalf("expected architecture reviewer severity to remain high, got %+v", gotByReviewer["reviewer-architecture"])
+	if persisted[0].ReviewerID != "reviewer-correctness" || persisted[0].Severity != "high" {
+		t.Fatalf("expected persisted finding to keep reviewer attribution and strongest severity, got %+v", persisted[0])
 	}
 
 	payload := loadOrchestratorEventPayload(t, storeService, eventReviewAggregated)
@@ -2271,14 +2087,14 @@ func TestRunReviewStagePersistsReviewerAttributionAndHighestSeverity(t *testing.
 	}
 	findingsPayload, ok := stageResultPayload["findings"].([]any)
 	if !ok || len(findingsPayload) != 1 {
-		t.Fatalf("expected one aggregated finding in the event payload, got %+v", stageResultPayload)
+		t.Fatalf("expected one deduped finding in the event payload, got %+v", stageResultPayload)
 	}
-	aggregatedFinding, ok := findingsPayload[0].(map[string]any)
+	dedupedFinding, ok := findingsPayload[0].(map[string]any)
 	if !ok {
-		t.Fatalf("expected aggregated finding payload, got %+v", findingsPayload[0])
+		t.Fatalf("expected deduped finding payload, got %+v", findingsPayload[0])
 	}
-	if got := aggregatedFinding["severity"]; got != "high" {
-		t.Fatalf("expected event payload to keep the highest severity, got %#v", got)
+	if got := dedupedFinding["severity"]; got != "high" {
+		t.Fatalf("expected event payload to keep the strongest deduped severity, got %#v", got)
 	}
 }
 
@@ -2422,7 +2238,7 @@ func TestHandleReviewPassClearsFailureAndHumanMetadata(t *testing.T) {
 	assertOrchestratorEventTypes(t, storeService, []string{eventReviewAggregated})
 }
 
-func TestRunTaskStartsReviewersInParallel(t *testing.T) {
+func TestRunTaskUsesConfiguredSingleReviewerLens(t *testing.T) {
 	t.Parallel()
 
 	storeService := openOrchestratorTestStore(t)
@@ -2445,18 +2261,6 @@ func TestRunTaskStartsReviewersInParallel(t *testing.T) {
 		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
 		WorktreePath:            &worktreePath,
 	})
-
-	startedCorrectness := make(chan struct{})
-	startedTest := make(chan struct{})
-	awaitPeer := func(t *testing.T, self, peer chan struct{}) {
-		t.Helper()
-		close(self)
-		select {
-		case <-peer:
-		case <-time.After(250 * time.Millisecond):
-			t.Fatalf("expected reviewer sessions to start in parallel")
-		}
-	}
 
 	runner := &fakeAgentRunner{
 		t: t,
@@ -2484,29 +2288,12 @@ func TestRunTaskStartsReviewersInParallel(t *testing.T) {
 			{
 				agentType: agentrun.AgentReviewer,
 				attempt:   1,
-				lens:      "correctness",
-				assert: func(t *testing.T, _ agentrun.Request, _ agentrun.ExecuteOptions) {
-					awaitPeer(t, startedCorrectness, startedTest)
-				},
+				lens:      "architecture",
 				result: agentrun.Result{
 					Status:       "pass",
-					Summary:      "correctness looks good",
+					Summary:      "architecture review passed",
 					NextAction:   "open_task_pr",
-					ArtifactRefs: artifactRefsFor("review-correctness-01"),
-				},
-			},
-			{
-				agentType: agentrun.AgentReviewer,
-				attempt:   1,
-				lens:      "test",
-				assert: func(t *testing.T, _ agentrun.Request, _ agentrun.ExecuteOptions) {
-					awaitPeer(t, startedTest, startedCorrectness)
-				},
-				result: agentrun.Result{
-					Status:       "pass",
-					Summary:      "tests look good",
-					NextAction:   "open_task_pr",
-					ArtifactRefs: artifactRefsFor("review-test-01"),
+					ArtifactRefs: artifactRefsFor("review-01"),
 				},
 			},
 		},
@@ -2518,8 +2305,8 @@ func TestRunTaskStartsReviewersInParallel(t *testing.T) {
 	})
 
 	result, err := service.RunTask(context.Background(), RunTaskOptions{
-		TaskID:         "Sprint-04/Task-02",
-		ReviewerLenses: []string{"correctness", "test"},
+		TaskID:       "Sprint-04/Task-02",
+		ReviewerLens: " architecture ",
 	})
 	if err != nil {
 		t.Fatalf("run task: %v", err)
@@ -2529,9 +2316,12 @@ func TestRunTaskStartsReviewersInParallel(t *testing.T) {
 	if result.Status != "pr_open" || result.NextAction != "open_task_pr" {
 		t.Fatalf("unexpected orchestrator result: %+v", result)
 	}
+	if len(result.StageResults) != 3 || result.StageResults[2].TaskStatus != "pr_open" {
+		t.Fatalf("unexpected review stage result: %+v", result.StageResults)
+	}
 }
 
-func TestRunTaskMovesLowConfidenceReviewFindingToAwaitingHuman(t *testing.T) {
+func TestRunTaskMovesReviewerEscalationToAwaitingHuman(t *testing.T) {
 	t.Parallel()
 
 	storeService := openOrchestratorTestStore(t)
@@ -2583,9 +2373,9 @@ func TestRunTaskMovesLowConfidenceReviewFindingToAwaitingHuman(t *testing.T) {
 				attempt:   1,
 				lens:      "correctness",
 				result: agentrun.Result{
-					Status:       "needs_changes",
-					Summary:      "possible race condition",
-					NextAction:   "return_to_developer",
+					Status:       "blocked",
+					Summary:      "review needs a human decision on a low-confidence race condition",
+					NextAction:   "await_human",
 					ArtifactRefs: artifactRefsFor("review-01"),
 					Findings: []agentrun.Finding{
 						{
@@ -2598,20 +2388,9 @@ func TestRunTaskMovesLowConfidenceReviewFindingToAwaitingHuman(t *testing.T) {
 							Summary:            "possible race on task state",
 							Evidence:           "state is updated after async work completes",
 							FindingFingerprint: "correctness:orchestrator:possible-race",
-							SuggestedAction:    "verify the transition with a second review or manual check",
+							SuggestedAction:    "review manually before opening the task PR",
 						},
 					},
-				},
-			},
-			{
-				agentType: agentrun.AgentReviewer,
-				attempt:   1,
-				lens:      "test",
-				result: agentrun.Result{
-					Status:       "pass",
-					Summary:      "test review could not reproduce the race",
-					NextAction:   "open_task_pr",
-					ArtifactRefs: artifactRefsFor("review-secondary-01"),
 				},
 			},
 		},
@@ -2636,18 +2415,10 @@ func TestRunTaskMovesLowConfidenceReviewFindingToAwaitingHuman(t *testing.T) {
 	if len(result.StageResults) != 3 || result.StageResults[2].TaskStatus != "awaiting_human" {
 		t.Fatalf("unexpected review stage result: %+v", result.StageResults)
 	}
-	if result.ArtifactRefs.Report != ".toolhub/runs/review-01/result.json" {
-		t.Fatalf("expected finding-producing reviewer refs after secondary validation, got %+v", result.ArtifactRefs)
-	}
 
 	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-02")
 	if taskRow.Status != "awaiting_human" || !taskRow.NeedsHuman {
 		t.Fatalf("expected awaiting_human task row, got %+v", taskRow)
-	}
-
-	payload := loadOrchestratorEventPayload(t, storeService, eventReviewAggregated)
-	if got := payload["task_status_to"]; got != "review_failed" {
-		t.Fatalf("expected review_aggregated to land on review_failed, got %+v", payload)
 	}
 
 	assertOrchestratorEventTypes(t, storeService, []string{

@@ -29,6 +29,48 @@ func TestLoadUsesDefaultConfigPath(t *testing.T) {
 	if got := cfg.DefaultModelFor("reviewer"); got != "gpt-5.3-codex-spark" {
 		t.Fatalf("unexpected reviewer default model: %s", got)
 	}
+	if got, _ := cfg.AgentProfile("developer"); got.Runner != "" {
+		t.Fatalf("expected empty runner override by default, got %q", got.Runner)
+	}
+}
+
+func TestLoadPreservesAgentRunnerOverride(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, DefaultFile, strings.TrimSpace(`
+repo:
+  github_owner: acme
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
+default_model: gpt-5.4
+
+agents:
+  developer:
+    runner: claude-cli
+    template_file: prompts/agents/developer.md
+  qa:
+    template_file: prompts/agents/qa.md
+  reviewer:
+    template_file: prompts/agents/reviewer.md
+`)+"\n")
+
+	cfg, err := Load(root, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	profile, ok := cfg.AgentProfile("developer")
+	if !ok {
+		t.Fatal("expected developer profile")
+	}
+	if profile.Runner != "claude-cli" {
+		t.Fatalf("unexpected runner override: %q", profile.Runner)
+	}
 }
 
 func TestLoadUsesConfigFileEnvOverride(t *testing.T) {

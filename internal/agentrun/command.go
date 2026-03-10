@@ -196,6 +196,16 @@ func (w *progressEventWriter) handleLine(line string) {
 		}
 	case "turn.completed":
 		fmt.Fprintln(w.out, "[progress] agent finished")
+	case "system":
+		if subtype, _ := event["subtype"].(string); subtype == "init" {
+			fmt.Fprintln(w.out, "[progress] agent started")
+		}
+	case "assistant":
+		if summary := summarizeClaudeAssistant(event); summary != "" {
+			fmt.Fprintf(w.out, "[progress] %s\n", summary)
+		}
+	case "result":
+		fmt.Fprintln(w.out, "[progress] agent finished")
 	}
 }
 
@@ -226,6 +236,40 @@ func summarizeTodoList(value any) string {
 		return fmt.Sprintf("todo %d/%d completed", completed, len(items))
 	}
 	return fmt.Sprintf("todo %d/%d, current: %s", completed, len(items), current)
+}
+
+func summarizeClaudeAssistant(event map[string]any) string {
+	message, _ := event["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	if len(content) == 0 {
+		return ""
+	}
+
+	for _, raw := range content {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch partType, _ := part["type"].(string); partType {
+		case "tool_use":
+			name, _ := part["name"].(string)
+			if strings.TrimSpace(name) != "" {
+				return fmt.Sprintf("using tool: %s", name)
+			}
+		case "text":
+			text, _ := part["text"].(string)
+			text = strings.TrimSpace(text)
+			if text == "" {
+				continue
+			}
+			text = strings.Join(strings.Fields(text), " ")
+			if len(text) > 80 {
+				text = text[:77] + "..."
+			}
+			return fmt.Sprintf("assistant: %s", text)
+		}
+	}
+	return ""
 }
 
 type progressLineWriter struct {

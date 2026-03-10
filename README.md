@@ -71,7 +71,7 @@ Sprint-01
 - 维护该 task 的阶段状态与执行日志
 - 在 task 范围内启动 `Developer`、`QA`、`Reviewer`
 - 作为 task 内唯一的流程控制器，根据 Agent 返回结果决定下一步
-- 支持并发启动多个 `Reviewer` session，并对审查结果执行去重、聚合和分级
+- 对单个 `Reviewer` 结果执行 contract 校验、结构化收口和流程分级
 - 跟踪 PR、CI 和失败回退
 - 维护重试次数、失败指纹和循环预算
 - 必须在同一个 task 的 worktree、分支和 PR 上持续迭代，除非显式判定为需要废弃重建
@@ -91,21 +91,18 @@ Sprint-01
 - `Reviewer`
   - 评估代码质量和测试覆盖情况
   - 每个 `Reviewer` session 只负责一个明确审查视角，例如 `correctness`、`test`、`architecture`、`security`
-  - 产出结构化结果，例如 `approve`、`request_changes`、遗留风险
+  - 产出结构化结果，例如 `pass`、`request_changes`、`awaiting_human`
   - 不直接创建 PR，也不直接启动其他 Agent
 
-## Reviewer 并发与聚合策略
+## Reviewer 审查策略
 
-`Task Orchestrator` 必须支持在审查阶段并发运行多个 `Reviewer`，并对他们的 findings 做统一聚合。reviewer 语义聚合可以由 LLM 完成，但进入流程控制前必须经过稳定工具 contract 的验证与归一。
+`Task Orchestrator` 在审查阶段只运行单个 `Reviewer`。`Global Leader` 在 `Sprint PR` 创建前也只运行单个 `Reviewer`。
 
 强制规则如下：
 
-- `Task PR` 的审查阶段默认启动 `1` 个 `Reviewer`
-- 当 `Task` 涉及核心模块、安全权限、数据库迁移、公开接口、构建发布链路，或 diff 超过预设阈值时，`Task Orchestrator` 必须并发启动 `2` 到 `3` 个 `Reviewer`
-- `Sprint PR` 创建前，`Global Leader` 必须在当前 `Sprint Branch` 上并发启动至少 `2` 个 `Reviewer`
-- 并发 `Reviewer` 不能使用完全相同的审查视角，必须采用异质化配置
-- 标准审查视角必须覆盖 `correctness`、`test`、`architecture`
-- 当变更涉及安全边界、认证授权、密钥、依赖升级或外部输入处理时，必须额外加入 `security` 视角
+- `Task PR` 的审查阶段固定只启动 `1` 个 `Reviewer`
+- `Sprint PR` 创建前固定只启动 `1` 个 `Reviewer`
+- `Reviewer` 可以带一个明确的审查视角；标准视角集合仍为 `correctness`、`test`、`architecture`、`security`
 - 每个 `Reviewer` 只返回结构化 findings，不直接返回流程控制动作
 
 每条 finding 必须包含以下字段：
@@ -121,19 +118,14 @@ Sprint-01
 - `finding_fingerprint`
 - `suggested_action`
 
-`Task Orchestrator` 或 `Global Leader` 在聚合 findings 时必须遵循以下规则：
+`Task Orchestrator` 或 `Global Leader` 在消费 reviewer findings 时必须遵循以下规则：
 
-- 按 `finding_fingerprint` 去重
-- 同一问题被多个 `Reviewer` 命中时，必须提升其置信度和处理优先级
 - 任一 `critical` finding 都必须阻塞当前流程并返回修复
-- 单个 `Reviewer` 提出的中低置信度 finding 不得直接阻塞，必须先经过补充审查或二次验证
-- 如果多个 `Reviewer` 结论冲突，必须发起补充审查，或将该问题升级为人工判定项
-- 聚合后的审查结论必须以结构化摘要形式附加到 `Task PR` 或 `Sprint PR`
-- 聚合结果中的 `summary` 只做人类可读摘要，不得作为唯一机器分支依据；调用方必须优先消费结构化字段
-- 聚合结果至少必须结构化暴露：`has_critical_finding`、`has_blocking_finding`、`has_conflict`、`has_reviewer_escalation`、`needs_supplemental_review`
-- 当 `blocking` 与 `conflict` 并存时，`conflict` 的人工/补充审查要求拥有更高的最终决策优先级，但 `blocking` 信号本身不得丢失
-- 当只存在 `needs_supplemental_review` 且不存在 `blocking` / `conflict` / `reviewer_escalation` 时，聚合结果应保留非阻塞决策，同时显式返回补充审查信号供上层继续验证
-- 语义聚合判断与 contract 验证/归一是两层职责：前者可由 LLM 完成，后者必须由稳定工具实现并强制收口
+- 非 `critical` findings 是否进入 `request_changes` 或 `awaiting_human`，取决于单个 reviewer 的结构化结论与 escalation 信号
+- 如果 reviewer 明确表示证据不足、判断不稳定、需要人工裁决或其他无法自动收口的情形，必须直接升级为人工判定项
+- 审查结论必须以结构化摘要形式附加到 `Task PR` 或 `Sprint PR`
+- 审查结果中的 `summary` 只做人类可读摘要，不得作为唯一机器分支依据；调用方必须优先消费结构化字段
+- 审查结果至少必须结构化暴露：`has_critical_finding`、`has_blocking_finding`、`has_reviewer_escalation`
 
 ## 上下文管理原则
 
@@ -142,7 +134,7 @@ Sprint-01
 - `Global Leader` 只读取结构化摘要，不读取完整日志
 - 单个 task 的完整上下文只保留在对应的 `Task Orchestrator` 中
 - 每个阶段都输出统一结果对象，例如 `status`、`summary`、`artifact_refs`、`next_action`
-- `Sprint` 级上下文只保留聚合摘要，例如 task 完成度、阻塞项、Sprint PR 状态
+- `Sprint` 级上下文只保留结构化摘要，例如 task 完成度、阻塞项、Sprint PR 状态
 - 需要复盘时，再通过 `artifact_refs` 按需读取日志、补丁、测试报告或 PR 链接
 
 示例结果对象：
@@ -150,15 +142,15 @@ Sprint-01
 ```json
 {
   "sprint_id": "Sprint-01",
-  "task_id": "TASK-123",
+  "task_id": "Sprint-01/Task-03",
   "stage": "qa",
   "status": "failed",
   "summary": "lint failed in src/api/router.ts",
   "attempt": 2,
   "failure_fingerprint": "eslint:src/api/router.ts:no-unused-vars",
   "artifact_refs": {
-    "log": "logs/TASK-123/qa-02.log",
-    "worktree": "worktrees/TASK-123"
+    "log": "logs/Sprint-01/Task-03/qa-02.log",
+    "worktree": "worktrees/Sprint-01/Task-03"
   },
   "next_action": "return_to_developer"
 }
@@ -182,19 +174,19 @@ Sprint-01
 
 ```json
 {
-  "event_id": "evt_TASK-123_qa_failed_02",
+  "event_id": "evt_Sprint-01_Task-03_qa_failed_02",
   "event_type": "task.qa_failed",
   "entity_type": "task",
-  "entity_id": "TASK-123",
+  "entity_id": "Sprint-01/Task-03",
   "sprint_id": "Sprint-01",
   "attempt": 2,
   "caused_by": "qa",
-  "idempotency_key": "TASK-123:qa:2",
+  "idempotency_key": "Sprint-01/Task-03:qa:2",
   "occurred_at": "2026-03-06T10:00:00Z",
   "payload": {
     "failure_fingerprint": "eslint:src/api/router.ts:no-unused-vars",
     "artifact_refs": {
-      "log": "logs/TASK-123/qa-02.log"
+      "log": "logs/Sprint-01/Task-03/qa-02.log"
     }
   }
 }
@@ -208,7 +200,7 @@ Sprint-01
 - `qa_passed`
 - `qa_failed`
 - `review_started`
-- `review_aggregated`
+- `review_completed`
 - `task_pr_opened`
 - `ci_started`
 - `ci_passed`
@@ -253,14 +245,14 @@ Sprint-01
 
 强制约束：
 
-- `Sprint` 开始时先创建 `Sprint Branch`
+- `Sprint` 下第一个 `Task` 启动时，由 `prepare-worktree-tool` 自动创建 `Sprint Branch`（若不存在则从 `default_branch` 创建并推送）
 - 同一 `Sprint` 内的 `Task` 按顺序依次执行
 - 每个 `Task` 开始前，都从当前最新的 `Sprint Branch` 创建自己的 task 分支和 worktree
 - 同一 `Sprint` 内的每个 `Task` 独立开发、独立验证、独立发起 `Task PR`
 - `Task PR` 合并进入对应的 `Sprint` 分支，而不是直接进入主干
 - 一个 `Task PR` 自动合并后，下一个 `Task` 必须基于更新后的 `Sprint Branch` 继续开发
 - 只有 `Sprint` 内所有 `Task` 都完成后，才由 `Global Leader` 创建 `Sprint PR`
-- `Sprint PR` 创建前，必须先对当前 `Sprint Branch` 执行多 `Reviewer` 并发审查，并附上聚合结论
+- `Sprint PR` 创建前，必须先对当前 `Sprint Branch` 执行一次 `Reviewer` 审查，并附上结构化审查结论
 - `Sprint PR` 必须由人工审查和人工合并
 - 如果某个 `Task` 进入 `blocked` 或 `escalated`，则禁止生成该 `Sprint` 的汇总 PR
 
@@ -338,14 +330,14 @@ Sprint-01
                                  | fail   | review
                                  v        v
                           back to   +------------------+
-                          Developer | Reviewer Set     |
-                                    | 1..N parallel    |
+                          Developer | Reviewer         |
+                                    | single session   |
                                     +-----+--------+---+
-                                          | findings
+                                          | result
                                           v
                                     +------------------+
                                     | Orchestrator     |
-                                    | aggregates +     |
+                                    | validates +      |
                                     | decides next step|
                                     +-----+--------+---+
                                           | fail   | pass
@@ -411,7 +403,12 @@ Sprint-01
 - `Task PR` 的 `CI passed` 不应直接等于 `done`
 - `Task PR` 自动合并完成后，必须将该 `Task` 标记为 `done`
 - 如果 `Task PR` 尚未完成自动合并，则 `Task Orchestrator` 必须先回报 `ready_to_merge`
-- `awaiting_human` 表示系统已经停止自动推进，并给出了明确的人类处理动作，恢复后必须显式回到某个允许的自动状态
+- `awaiting_human` 表示系统已经停止自动推进；进入该状态时，必须同时产出以下信息：
+  - `human_reason`：问题摘要，说明为何无法继续自动推进
+  - `suggested_action`：建议的人类操作，例如 `fix_and_resume`（修复后继续）/ `close_and_skip`（跳过此 task）/ `manual_merge`（人工合并）/ `investigate`（人工调查后决定）
+  - `artifact_refs`：相关日志、PR 链接等引用
+  - 以上信息必须同时写入 `timeline-log-tool`（`append_human_handoff`）并在对应 GitHub issue 追加评论
+  - 恢复后必须显式触发 `human_resume_to_*` 事件，回到某个允许的自动状态
 - `merge_failed` 表示 PR 已满足合并前条件，但在自动合并动作本身失败，例如分支保护、竞态更新或平台错误
 - `done`、`blocked`、`escalated`、`canceled` 为终态；终态只能通过人工创建新的 task 或显式重开流程来继续
 - 同一 task 的多轮修复必须复用原有 worktree、分支和 PR
@@ -457,10 +454,10 @@ Sprint-01
 | `qa_in_progress`     | `qa_failed`                          | `qa_failed`              | 记录失败指纹与日志引用                                |
 | `qa_failed`          | `retry_approved` 且未命中循环打断    | `dev_in_progress`        | 返回开发修复                                          |
 | `qa_failed`          | 命中循环上限、重复失败或无进展       | `escalated` 或 `blocked` | 由 `Task Orchestrator` 判定                           |
-| `review_in_progress` | `review_aggregated` 且结论为通过     | `pr_open`                | 创建或更新 `Task PR`                                  |
-| `review_in_progress` | `review_aggregated` 且结论为退回     | `review_failed`          | 记录聚合 findings                                     |
+| `review_in_progress` | `review_passed`                      | `pr_open`                | 创建或更新 `Task PR`                                  |
+| `review_in_progress` | `review_changes_requested`           | `review_failed`          | 记录 reviewer findings                                |
+| `review_in_progress` | `review_awaits_human`                | `awaiting_human`         | reviewer 明确要求人工裁决或无法自动收口               |
 | `review_failed`      | `retry_approved` 且未命中循环打断    | `dev_in_progress`        | 返回开发修复                                          |
-| `review_failed`      | finding 冲突、置信度不足或需人工裁决 | `awaiting_human`         | 停止自动推进，等待人工判定                            |
 | `review_failed`      | 命中循环上限、重复失败或无进展       | `escalated` 或 `blocked` | 由 `Task Orchestrator` 判定                           |
 | `pr_open`            | `ci_started`                         | `ci_in_progress`         | PR 已创建且 CI 已触发                                 |
 | `ci_in_progress`     | `ci_passed`                          | `ready_to_merge`         | 可以进入自动合并                                      |
@@ -497,9 +494,11 @@ Sprint-01
 | `partially_done`                  | 仍有未完成 `Task` 被持续推进              | `partially_done`              | 自循环合法，但必须伴随新的 task 事件         |
 | `in_progress` 或 `partially_done` | 任一 `Task` 进入 `blocked` 或 `escalated` | `blocked`                     | 当前 `Sprint` 不得创建汇总 PR                |
 | `partially_done`                  | 所有 `Task` 均为 `done`                   | `ready_for_sprint_pr`         | 可以启动 `Sprint` 级审查                     |
-| `ready_for_sprint_pr`             | `sprint_review_started`                   | `sprint_reviewing`            | 启动并发 `Reviewer` 审查                     |
-| `sprint_reviewing`                | 聚合结论要求修复或人工裁决                | `blocked` 或 `awaiting_human` | 按问题性质决定是否允许恢复                   |
-| `sprint_reviewing`                | 审查通过且 `Sprint PR` 已创建             | `sprint_pr_open`              | 进入人工审查 / 合并阶段                      |
+| `ready_for_sprint_pr`             | `sprint_review_started`                   | `sprint_reviewing`            | 启动单个 `Reviewer` 审查                     |
+| `sprint_reviewing`                | `decision=pass`（无阻塞 finding）         | `sprint_pr_open`              | 审查通过，创建 `Sprint PR` 后进入等待人工阶段 |
+| `sprint_reviewing`                | `has_critical_finding` 或 `has_blocking_finding` | `blocked`            | 发现严重问题，禁止创建 `Sprint PR`           |
+| `sprint_reviewing`                | `has_reviewer_escalation=true`            | `awaiting_human`              | reviewer 无法自动收口，需要人工裁决          |
+| `sprint_reviewing`                | `decision=request_changes` 且无 critical/blocking | `awaiting_human`    | 存在非阻塞 findings，由人工决定是否可接受    |
 | `sprint_pr_open`                  | 等待人工审查或人工合并                    | `awaiting_human`              | 系统不再自动推进                             |
 | `awaiting_human`                  | `sprint_pr_merged`                        | `done`                        | 人工审查和合并已完成                         |
 | `awaiting_human`                  | `sprint_merge_failed`                     | `merge_failed`                | 平台拒绝合并或发生最终集成冲突               |
@@ -513,10 +512,12 @@ Sprint-01
 - 总迭代上限：必须配置，例如单个 task 的上限为 5 到 8 轮完整修复循环
 - 分阶段重试上限：必须配置，例如 `QA` 连续失败 3 次、`Reviewer` 连续打回 2 次、CI 连续失败 3 次即停止自动推进
 - 失败指纹去重：如果连续多轮命中同一个错误指纹，例如同一文件同一类 lint 失败，必须直接升级而不是继续重复尝试
-- 无进展检测：如果多轮提交的 diff 很小，且失败原因未变化，必须判定为无实质进展
+- 无进展检测：满足以下**两个条件**时判定为无实质进展：
+  1. 连续 N 次 attempt 的 `failure_fingerprint` 未发生改变（N 与对应阶段重试上限一致）
+  2. 相邻两次提交的净变更行数低于 `no_progress_min_diff_lines` 配置阈值，且未引入新文件
 - 升级策略：达到上限后，必须将 task 标记为 `escalated` 或 `blocked`，并附带最近几轮摘要、日志引用和明确的人类处理动作
 
-阈值必须由 `Global Leader` 统一配置，并由 `Task Orchestrator` 在单个 task 内执行判定。
+阈值必须由 `Global Leader` 统一配置，并由 `Task Orchestrator` 在单个 task 内执行判定。阈值配置方式见 `TECH-V1.md`。
 
 ## 核心流程
 
@@ -534,9 +535,9 @@ Sprint-01
 12. `Task Orchestrator` 启动 `QA`
 13. `QA` 执行静态分析和测试，并将结构化结果返回给 `Task Orchestrator`
 14. `Task Orchestrator` 根据 `QA` 结果决定是返回 `Developer` 修复，还是进入 `Reviewer`
-15. `Task Orchestrator` 按审查策略启动一个或多个并发 `Reviewer` session
-16. 每个 `Reviewer` 从各自审查视角评估代码质量和测试覆盖情况，并返回结构化 findings
-17. `Task Orchestrator` 对多个 `Reviewer` 的 findings 执行去重、聚合和分级，然后决定是返回 `Developer` 修复，还是创建 `Task PR` 并推送代码到对应的 `Sprint Branch`
+15. `Task Orchestrator` 启动单个 `Reviewer` session
+16. `Reviewer` 从其审查视角评估代码质量和测试覆盖情况，并返回结构化 findings 与结论
+17. `Task Orchestrator` 对该结果执行 contract 校验与结构化收口，然后决定是返回 `Developer` 修复、升级人工，还是创建 `Task PR` 并推送代码到对应的 `Sprint Branch`
 18. `Task PR` 触发 CI
 19. 如果 CI 失败，则创建 Issue，由 `Task Orchestrator` 结合失败原因、重试次数和失败指纹决定是否返回 `Developer`
 20. 如果达到循环上限、重复命中同类失败或长时间无进展，则由 `Task Orchestrator` 将 task 标记为 `escalated` 或 `blocked`
@@ -544,7 +545,7 @@ Sprint-01
 22. `Task PR` 自动合并完成后，由 `Task Orchestrator` 将结果回报给 `Global Leader`
 23. `Global Leader` 更新该 `Task` 的状态，并检查所属 `Sprint` 是否已全部完成
 24. 如果该 `Sprint` 下仍有未完成的 `Task`，则下一个 `Task` 从最新的 `Sprint Branch` 继续开发
-25. 如果该 `Sprint` 下所有 `Task` 均已完成，则由 `Global Leader` 先在该 `Sprint Branch` 上启动并发 `Reviewer` 审查并聚合结果，再创建 `Sprint PR`
+25. 如果该 `Sprint` 下所有 `Task` 均已完成，则由 `Global Leader` 先在该 `Sprint Branch` 上启动单个 `Reviewer` 审查并收口结果，再创建 `Sprint PR`
 26. `Sprint PR` 面向主干分支，禁止自动合并，必须经过人工审查和人工合并
 27. `Sprint PR` 合并完成后，`Global Leader` 将该 `Sprint` 标记为 `done`
 28. `Global Leader` 清理资源并继续处理下一个 `Sprint` 或 `Task`

@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -51,25 +49,6 @@ type stageResultArtifactEnvelope struct {
 type stageResultArtifactPayload struct {
 	Stage        Stage                 `json:"stage"`
 	ArtifactRefs agentrun.ArtifactRefs `json:"artifact_refs"`
-}
-
-type reviewObservation struct {
-	lens     string
-	result   StageResult
-	findings []agentrun.Finding
-}
-
-type reviewRunResult struct {
-	index       int
-	observation reviewObservation
-	retryable   *StageResult
-	err         error
-}
-
-type reviewFindingAggregate struct {
-	finding     agentrun.Finding
-	hitCount    int
-	reviewerIDs map[string]struct{}
 }
 
 type stageWriteRejectedError struct {
@@ -490,125 +469,34 @@ func (s *Service) runReviewStage(
 	ctx context.Context,
 	snapshot taskRuntimeSnapshot,
 	opts RunTaskOptions,
-	lenses []string,
+	lens string,
 	artifactRefs agentrun.ArtifactRefs,
 ) (StageResult, []agentrun.Finding, error) {
-	observations, resultRefs, retryResult, err := s.executeReviewObservations(ctx, snapshot, opts, lenses, artifactRefs)
+	result, err := s.runAgentStage(ctx, StageReview, snapshot, opts, agentrun.ArtifactRefs{}, agentrun.ArtifactRefs{}, artifactRefs, lens)
 	if err != nil {
 		return StageResult{}, nil, err
 	}
-	if retryResult != nil {
-		return *retryResult, nil, nil
+	if isRetryableStageFailure(result) {
+		result.Stage = StageReview
+		result.AgentType = agentrun.AgentReviewer
+		result.Attempt = snapshot.AttemptTotal
+		return result, nil, nil
 	}
 
-	stageResult, needsSecondaryValidation := aggregateReviewStageResult(snapshot.AttemptTotal, observations, resultRefs, false)
-	if needsSecondaryValidation {
-		if supplementalLens, ok := secondaryValidationLens(lenses); ok {
-			supplementalObservations, supplementalRefs, supplementalRetry, err := s.executeReviewObservations(
-				ctx,
-				snapshot,
-				opts,
-				[]string{supplementalLens},
-				artifactRefs,
-			)
-			if err != nil {
-				return StageResult{}, nil, err
-			}
-			if supplementalRetry != nil {
-				supplementalRetry.ArtifactRefs = firstArtifactRefs(supplementalRetry.ArtifactRefs, resultRefs, supplementalRefs)
-				return *supplementalRetry, nil, nil
-			}
-
-			observations = append(observations, supplementalObservations...)
-			resultRefs = firstArtifactRefs(resultRefs, supplementalRefs)
-			stageResult, _ = aggregateReviewStageResult(snapshot.AttemptTotal, observations, resultRefs, true)
-		}
+	normalizedFindings, err := normalizeFindings(result.Findings, lens)
+	if err != nil {
+		return *retryableMalformedReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, err), nil, nil
+	}
+	if err := validateReviewObservationContract(result, normalizedFindings, lens); err != nil {
+		return *retryableMalformedReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, err), nil, nil
 	}
 
-	stageResult.ArtifactRefs = selectAggregatedReviewArtifactRefs(stageResult, observations, resultRefs)
-	stageResult.Stage = StageReview
-	stageResult.AgentType = agentrun.AgentReviewer
-	stageResult.Attempt = snapshot.AttemptTotal
-	return stageResult, collectReviewFindings(observations), nil
-}
-
-func (s *Service) executeReviewObservations(
-	ctx context.Context,
-	snapshot taskRuntimeSnapshot,
-	opts RunTaskOptions,
-	lenses []string,
-	artifactRefs agentrun.ArtifactRefs,
-) ([]reviewObservation, agentrun.ArtifactRefs, *StageResult, error) {
-	results := make([]reviewRunResult, len(lenses))
-	var wg sync.WaitGroup
-	for index, lens := range lenses {
-		wg.Add(1)
-		go func(index int, lens string) {
-			defer wg.Done()
-
-			result, err := s.runAgentStage(ctx, StageReview, snapshot, opts, agentrun.ArtifactRefs{}, agentrun.ArtifactRefs{}, artifactRefs, lens)
-			if err != nil {
-				results[index] = reviewRunResult{index: index, err: err}
-				return
-			}
-			if isRetryableStageFailure(result) {
-				result.Stage = StageReview
-				result.AgentType = agentrun.AgentReviewer
-				result.Attempt = snapshot.AttemptTotal
-				results[index] = reviewRunResult{
-					index:     index,
-					retryable: &result,
-				}
-				return
-			}
-
-			normalizedFindings, err := normalizeFindings(result.Findings, lens)
-			if err != nil {
-				results[index] = reviewRunResult{
-					index:     index,
-					retryable: retryableMalformedReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, err),
-				}
-				return
-			}
-			if err := validateReviewObservationContract(result, normalizedFindings, lens); err != nil {
-				results[index] = reviewRunResult{
-					index:     index,
-					retryable: retryableMalformedReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, err),
-				}
-				return
-			}
-
-			results[index] = reviewRunResult{
-				index: index,
-				observation: reviewObservation{
-					lens:     lens,
-					result:   result,
-					findings: normalizedFindings,
-				},
-			}
-		}(index, lens)
-	}
-	wg.Wait()
-
-	observations := make([]reviewObservation, 0, len(results))
-	resultRefs := firstReviewArtifactRefs(results...)
-	for _, runResult := range results {
-		if runResult.err != nil {
-			return nil, agentrun.ArtifactRefs{}, nil, runResult.err
-		}
-	}
-	for _, runResult := range results {
-		if runResult.retryable != nil {
-			retryResult := *runResult.retryable
-			retryResult.ArtifactRefs = firstArtifactRefs(retryResult.ArtifactRefs, resultRefs)
-			return nil, agentrun.ArtifactRefs{}, &retryResult, nil
-		}
-	}
-	for _, runResult := range results {
-		observations = append(observations, runResult.observation)
-	}
-
-	return observations, resultRefs, nil, nil
+	dedupedFindings := dedupePersistedReviewFindings(normalizedFindings)
+	result.Findings = copyFindings(dedupedFindings)
+	result.Stage = StageReview
+	result.AgentType = agentrun.AgentReviewer
+	result.Attempt = snapshot.AttemptTotal
+	return result, copyFindings(dedupedFindings), nil
 }
 
 func retryableMalformedReviewResult(attempt int, refs agentrun.ArtifactRefs, err error) *StageResult {
@@ -622,178 +510,6 @@ func retryableMalformedReviewResult(attempt int, refs agentrun.ArtifactRefs, err
 		FailureFingerprint: agentrun.ErrorCodeMalformedOutput,
 		ArtifactRefs:       refs,
 	}
-}
-
-func firstReviewArtifactRefs(results ...reviewRunResult) agentrun.ArtifactRefs {
-	for _, result := range results {
-		if result.retryable != nil && hasAnyArtifactRefs(result.retryable.ArtifactRefs) {
-			return result.retryable.ArtifactRefs
-		}
-		if hasAnyArtifactRefs(result.observation.result.ArtifactRefs) {
-			return result.observation.result.ArtifactRefs
-		}
-	}
-	return agentrun.ArtifactRefs{}
-}
-
-func selectAggregatedReviewArtifactRefs(stageResult StageResult, observations []reviewObservation, fallback agentrun.ArtifactRefs) agentrun.ArtifactRefs {
-	for _, observation := range prioritizedReviewObservations(stageResult, observations) {
-		if hasAnyArtifactRefs(observation.result.ArtifactRefs) {
-			return observation.result.ArtifactRefs
-		}
-	}
-	return fallback
-}
-
-func prioritizedReviewObservations(stageResult StageResult, observations []reviewObservation) []reviewObservation {
-	prioritized := append([]reviewObservation(nil), observations...)
-	sort.SliceStable(prioritized, func(i, j int) bool {
-		left := prioritized[i]
-		right := prioritized[j]
-
-		leftHasFindings := len(left.findings) > 0
-		rightHasFindings := len(right.findings) > 0
-		if strings.TrimSpace(stageResult.NextAction) == "open_task_pr" {
-			if leftHasFindings != rightHasFindings {
-				return !leftHasFindings
-			}
-		} else if leftHasFindings != rightHasFindings {
-			return leftHasFindings
-		}
-
-		leftSeverity, leftConfidence := strongestObservationFinding(left)
-		rightSeverity, rightConfidence := strongestObservationFinding(right)
-		if leftSeverity != rightSeverity {
-			return leftSeverity > rightSeverity
-		}
-		if leftConfidence != rightConfidence {
-			return leftConfidence > rightConfidence
-		}
-		return len(left.findings) > len(right.findings)
-	})
-	return prioritized
-}
-
-func strongestObservationFinding(observation reviewObservation) (int, int) {
-	strongestSeverity := 0
-	strongestConfidence := 0
-	for _, finding := range observation.findings {
-		if severity := reviewSeverityRank(finding.Severity); severity > strongestSeverity {
-			strongestSeverity = severity
-		}
-		if confidence := reviewConfidenceRank(finding.Confidence); confidence > strongestConfidence {
-			strongestConfidence = confidence
-		}
-	}
-	return strongestSeverity, strongestConfidence
-}
-
-func secondaryValidationLens(used []string) (string, bool) {
-	seen := make(map[string]struct{}, len(used))
-	for _, lens := range used {
-		if normalizedLens, ok := agentrun.NormalizeReviewerLens(lens); ok {
-			seen[normalizedLens] = struct{}{}
-		}
-	}
-	for _, candidate := range agentrun.AllowedReviewerLenses() {
-		if _, exists := seen[candidate]; exists {
-			continue
-		}
-		return candidate, true
-	}
-	return "", false
-}
-
-func aggregateReviewStageResult(
-	attempt int,
-	observations []reviewObservation,
-	refs agentrun.ArtifactRefs,
-	secondaryValidationAttempted bool,
-) (StageResult, bool) {
-	summaries := make([]string, 0, len(observations))
-	allFindings := make([]agentrun.Finding, 0, len(observations))
-	hasCriticalFinding := false
-	hasBlockingFinding := false
-	hasInsufficientConfidenceFinding := false
-	hasObservationWithoutFindings := false
-
-	for _, observation := range observations {
-		summaries = append(summaries, summarizeReviewerResult(observation.lens, observation.result))
-		allFindings = append(allFindings, observation.findings...)
-		if len(observation.findings) == 0 {
-			hasObservationWithoutFindings = true
-		}
-	}
-
-	findingAggregates := aggregateFindings(allFindings)
-	dedupedFindings := collapseFindingAggregates(findingAggregates)
-	for _, aggregate := range findingAggregates {
-		if reviewFindingIsCritical(aggregate.finding) {
-			hasCriticalFinding = true
-			hasBlockingFinding = true
-			continue
-		}
-		if reviewFindingIsBlocking(aggregate) {
-			hasBlockingFinding = true
-			continue
-		}
-		if reviewFindingNeedsSecondaryValidation(aggregate) {
-			hasInsufficientConfidenceFinding = true
-		}
-	}
-
-	stageResult := StageResult{
-		Stage:        StageReview,
-		AgentType:    agentrun.AgentReviewer,
-		Attempt:      attempt,
-		ArtifactRefs: refs,
-		Findings:     dedupedFindings,
-	}
-
-	switch {
-	case hasCriticalFinding:
-		stageResult.Status = "needs_changes"
-		stageResult.Summary = "review requested changes"
-		stageResult.NextAction = "return_to_developer"
-		stageResult.FailureFingerprint = reviewFailureFingerprint(attempt, dedupedFindings, "critical")
-	case hasBlockingFinding:
-		stageResult.Status = "needs_changes"
-		stageResult.Summary = "review findings require changes"
-		stageResult.NextAction = "return_to_developer"
-		stageResult.FailureFingerprint = reviewFailureFingerprint(attempt, dedupedFindings, "blocking_findings")
-	case hasInsufficientConfidenceFinding:
-		stageResult.Status = "blocked"
-		if !secondaryValidationAttempted {
-			stageResult.Summary = "review findings require secondary validation"
-			stageResult.FailureFingerprint = reviewFailureFingerprint(attempt, dedupedFindings, "secondary_validation_required")
-			stageResult.NextAction = "await_human"
-			break
-		}
-
-		if hasObservationWithoutFindings {
-			stageResult.Summary = "review findings remain inconclusive after secondary validation"
-			stageResult.FailureFingerprint = reviewFailureFingerprint(attempt, dedupedFindings, "secondary_validation_inconclusive")
-			stageResult.NextAction = "await_human"
-			break
-		}
-
-		stageResult.Status = "needs_changes"
-		stageResult.Summary = "review findings require changes after secondary validation"
-		stageResult.NextAction = "return_to_developer"
-		stageResult.FailureFingerprint = reviewFailureFingerprint(attempt, dedupedFindings, "secondary_validation_confirmed")
-	default:
-		stageResult.Status = "pass"
-		stageResult.Summary = "review passed"
-		stageResult.NextAction = "open_task_pr"
-	}
-
-	if len(summaries) > 0 {
-		stageResult.Summary = strings.Join(summaries, "; ")
-		if outcomeSummary := reviewOutcomeSummary(stageResult); outcomeSummary != "" && !strings.Contains(stageResult.Summary, outcomeSummary) {
-			stageResult.Summary = stageResult.Summary + " (" + outcomeSummary + ")"
-		}
-	}
-	return stageResult, hasInsufficientConfidenceFinding && len(observations) == 1 && !secondaryValidationAttempted
 }
 
 func (s *Service) handleDeveloperResult(ctx context.Context, snapshot taskRuntimeSnapshot, result StageResult) (StageResult, taskRuntimeSnapshot, error) {
@@ -1677,57 +1393,17 @@ func reviewFailureFingerprint(attempt int, findings []agentrun.Finding, fallback
 	return fmt.Sprintf("review:%02d:%s", attempt, strings.TrimSpace(fallback))
 }
 
-func normalizedReviewerLenses(lenses []string) ([]string, error) {
-	if len(lenses) == 0 {
-		return []string{defaultReviewerLens}, nil
+func normalizedReviewerLens(rawLens string) (string, error) {
+	rawLens = strings.TrimSpace(rawLens)
+	if rawLens == "" {
+		return defaultReviewerLens, nil
 	}
 
-	seen := make(map[string]struct{}, len(lenses))
-	var normalized []string
-	for _, rawLens := range lenses {
-		rawLens = strings.TrimSpace(rawLens)
-		if rawLens == "" {
-			continue
-		}
-
-		lens, ok := agentrun.NormalizeReviewerLens(rawLens)
-		if !ok {
-			return nil, fmt.Errorf("invalid reviewer lens %q (allowed: %s)", rawLens, strings.Join(agentrun.AllowedReviewerLenses(), ", "))
-		}
-		if _, ok := seen[lens]; ok {
-			return nil, fmt.Errorf("duplicate reviewer lens %q", lens)
-		}
-		seen[lens] = struct{}{}
-		normalized = append(normalized, lens)
+	lens, ok := agentrun.NormalizeReviewerLens(rawLens)
+	if !ok {
+		return "", fmt.Errorf("invalid reviewer lens %q (allowed: %s)", rawLens, strings.Join(agentrun.AllowedReviewerLenses(), ", "))
 	}
-	if len(normalized) == 0 {
-		return []string{defaultReviewerLens}, nil
-	}
-	return normalized, nil
-}
-
-func summarizeReviewerResult(lens string, result StageResult) string {
-	summary := strings.TrimSpace(result.Summary)
-	if summary == "" {
-		summary = strings.TrimSpace(result.Status)
-	}
-	if strings.TrimSpace(lens) == "" {
-		return summary
-	}
-	return lens + ": " + summary
-}
-
-func reviewOutcomeSummary(result StageResult) string {
-	switch {
-	case strings.TrimSpace(result.NextAction) == "await_human":
-		return "requires human validation"
-	case strings.TrimSpace(result.NextAction) == "return_to_developer":
-		return "return to developer"
-	case strings.TrimSpace(result.NextAction) == "open_task_pr":
-		return "ready for Task PR"
-	default:
-		return ""
-	}
+	return lens, nil
 }
 
 func validateReviewObservationContract(result StageResult, findings []agentrun.Finding, lens string) error {
@@ -1813,49 +1489,6 @@ func normalizeReviewFinding(finding agentrun.Finding, fallbackLens string) (agen
 	}
 }
 
-func aggregateFindings(findings []agentrun.Finding) []reviewFindingAggregate {
-	aggregates := make([]reviewFindingAggregate, 0, len(findings))
-	indexByKey := make(map[string]int, len(findings))
-	for _, finding := range findings {
-		key := reviewFindingAggregateKey(finding)
-		index, exists := indexByKey[key]
-		if !exists {
-			aggregate := reviewFindingAggregate{
-				finding:     finding,
-				hitCount:    1,
-				reviewerIDs: make(map[string]struct{}, 1),
-			}
-			if reviewerID := strings.TrimSpace(finding.ReviewerID); reviewerID != "" {
-				aggregate.reviewerIDs[reviewerID] = struct{}{}
-			}
-			aggregates = append(aggregates, aggregate)
-			indexByKey[key] = len(aggregates) - 1
-			continue
-		}
-
-		aggregate := &aggregates[index]
-		aggregate.hitCount++
-		if reviewerID := strings.TrimSpace(finding.ReviewerID); reviewerID != "" {
-			aggregate.reviewerIDs[reviewerID] = struct{}{}
-		}
-		aggregate.finding.Severity = strongerReviewSeverity(aggregate.finding.Severity, finding.Severity)
-		aggregate.finding.Confidence = strongerReviewConfidence(aggregate.finding.Confidence, finding.Confidence, len(aggregate.reviewerIDs))
-	}
-	return aggregates
-}
-
-func collapseFindingAggregates(aggregates []reviewFindingAggregate) []agentrun.Finding {
-	collapsed := make([]agentrun.Finding, 0, len(aggregates))
-	for _, aggregate := range aggregates {
-		finding := aggregate.finding
-		if len(aggregate.reviewerIDs) > 1 {
-			finding.Confidence = "high"
-		}
-		collapsed = append(collapsed, finding)
-	}
-	return collapsed
-}
-
 func reviewFindingAggregateKey(finding agentrun.Finding) string {
 	key := strings.TrimSpace(finding.FindingFingerprint)
 	if key != "" {
@@ -1889,27 +1522,6 @@ func strongerReviewSeverity(current, candidate string) string {
 		return current
 	}
 	return candidate
-}
-
-func reviewFindingIsCritical(finding agentrun.Finding) bool {
-	return normalizedReviewSeverity(finding.Severity) == "critical"
-}
-
-func reviewFindingIsBlocking(aggregate reviewFindingAggregate) bool {
-	if reviewFindingIsCritical(aggregate.finding) {
-		return true
-	}
-	if len(aggregate.reviewerIDs) > 1 {
-		return true
-	}
-	return reviewConfidenceRank(aggregate.finding.Confidence) >= reviewConfidenceRank("high")
-}
-
-func reviewFindingNeedsSecondaryValidation(aggregate reviewFindingAggregate) bool {
-	if reviewFindingIsBlocking(aggregate) {
-		return false
-	}
-	return reviewConfidenceRank(aggregate.finding.Confidence) < reviewConfidenceRank("high")
 }
 
 func normalizedReviewSeverity(severity string) string {
@@ -2121,17 +1733,6 @@ func copyFindings(findings []agentrun.Finding) []agentrun.Finding {
 		copied = append(copied, copyFinding)
 	}
 	return copied
-}
-
-func collectReviewFindings(observations []reviewObservation) []agentrun.Finding {
-	if len(observations) == 0 {
-		return nil
-	}
-	allFindings := make([]agentrun.Finding, 0, len(observations))
-	for _, observation := range observations {
-		allFindings = append(allFindings, copyFindings(observation.findings)...)
-	}
-	return allFindings
 }
 
 func copyStageResults(values []StageResult) []StageResult {

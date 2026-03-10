@@ -4,7 +4,7 @@
 
 ## 结论
 
-- `v1` 只实现 `codex exec`
+- `v1` 支持 `codex exec` 和 `claude -p`
 - `v1` 不选择 `codex` 的 HTTP / app server 方案
 
 原因很简单：
@@ -12,16 +12,18 @@
 - `codex exec` 是明确的非交互入口
 - `codex exec` 原生支持 `--output-schema`
 - `codex exec` 原生支持 `--json` 事件流和 `-o` 最终消息落盘
+- `claude -p` 原生支持 `--output-format json` 和 `--json-schema`
 
 ## 支持的 runner
 
-| runner_id    | CLI 入口     | 角色 |
-| ------------ | ------------ | ---- |
-| `codex_exec` | `codex exec` | 默认 |
+| runner_id        | CLI 入口        | 角色 |
+| ---------------- | --------------- | ---- |
+| `codex-cli`      | `codex exec`    | 默认 |
+| `claude-cli`     | `claude -p`     | 可选 |
 
 ## 命令模板
 
-### `codex_exec`
+### `codex-cli`
 
 ```bash
 codex \
@@ -41,17 +43,38 @@ codex \
 - 需要续跑时使用 `codex exec resume`
 - 默认模型和角色 prompt template 由 `config/config.yaml` + `prompts/agents/*.md` 提供
 - 要允许 agent 任意读写当前工作目录，必须同时显式设置 `--cd <worktree_path>` 和 `--sandbox workspace-write`
+- 默认运行产物目录为 worktree 内的 `.toolhub/runs`，因此默认不需要为产物目录额外追加 `--add-dir`
 - 只要 schema、最终消息文件或其他产物目录位于 worktree 外，就必须显式追加对应的 `--add-dir`
 - `toolhub run-task --isolated-codex-home` 只作为 `developer` / `qa` 的后备隔离开关；默认仍保留用户现有 `HOME`/登录态
 
+### `claude-cli`
+
+```bash
+claude \
+  -p "<prompt>" \
+  --output-format json \
+  --verbose \
+  --print \
+  --cwd <worktree_path> \
+  --json-schema '<schema_json>'
+```
+
+补充：
+
+- `developer` / `qa` 默认使用 `--permission-mode acceptEdits`
+- `reviewer` 默认使用 `--permission-mode plan`
+- `toolhub run-task --yolo` 时改为 `--dangerously-skip-permissions`
+- 当前实现把完整 prompt 直接作为 `-p` 参数传入
+- `claude-cli` 不使用单独的 `last-message.json` 落盘文件，toolhub 直接从 stdout 解析最终结构化结果
+
 ## `run-agent-tool` 实现要求
 
-- runner 固定为 `codex_exec`
+- runner 由 `config/config.yaml` 中每个 agent 的 `runner` 字段选择；未配置时默认 `codex-cli`
 - 命令必须在 task worktree 中执行
 - 角色 prompt 由固定骨架 prompt + `prompts/agents/<agent_type>.md` 模板共同组成
 - CLI 未显式传 `--model` 时，默认模型从 `config/config.yaml` 读取
 - 调用层统一传入同一份目标 schema
-- 依赖 `codex exec` 原生 schema 约束
+- `codex-cli` 和 `claude-cli` 都依赖各自 CLI 的原生 JSON/schema 约束能力
 - 任一 runner 返回非结构化结果时，统一映射为 `malformed_output`
 - 不得直接继承用户本机默认的危险权限配置；调用时必须显式指定权限策略
 
@@ -78,7 +101,7 @@ codex \
 - `qa` 仍使用 `workspace_write`，因为构建、测试和临时产物常会写入工作区
 - `reviewer` 必须保持只读，不允许修改代码或工作区状态
 
-### `codex_exec`
+### `codex-cli`
 
 - `developer`、`qa` 必须显式传 `--sandbox workspace-write`
 - `reviewer` 必须显式传 `--sandbox read-only`
@@ -88,9 +111,18 @@ codex \
 - 默认保留用户现有 `HOME`；只有 `developer` / `qa` 显式启用 `toolhub run-task --isolated-codex-home` 时，才把 `HOME` 重定向到 repo 内的 `.toolhub/runtime/home`
 - 不依赖用户 `profile` 中的 sandbox 默认值
 
+### `claude-cli`
+
+- `developer` / `qa` 必须显式传 `--permission-mode acceptEdits`
+- `reviewer` 必须显式传 `--permission-mode plan`
+- 禁止默认使用 `--dangerously-skip-permissions`
+- 仅在人工手动执行 `toolhub run-task --yolo` 时，允许改为传 `--dangerously-skip-permissions`
+- 命令必须显式传 `--cwd <worktree_path>`
+- schema 通过 `--json-schema` 直接传给 CLI
+- 默认保留用户现有 `HOME`
+
 ## 不纳入 `v1` 的内容
 
-- `claude --print`
 - `opencode run`
 - `codex app-server`
 - 自建 Agent HTTP 网关

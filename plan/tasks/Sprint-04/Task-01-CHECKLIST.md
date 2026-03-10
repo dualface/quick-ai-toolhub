@@ -36,7 +36,7 @@
 - `reviewer` 显式使用 `read-only`
 - worktree 外产物目录会自动追加 `--add-dir`
 - reviewer 运行所需的 runner 输出目录不会落在 worktree 内
-- 并发 reviewer 运行不会写到同一个 run 目录
+- 单 reviewer 运行目录与 developer / qa 产物目录保持隔离
 
 ## 运行目录与产物
 

@@ -1,8 +1,8 @@
-# [Sprint-06][Task-02] 实现 Sprint 级 review 聚合
+# [Sprint-06][Task-02] 实现 Sprint review 结果收口
 
 ## Goal
 
-聚合 `Sprint` 级 reviewer findings，形成 `Sprint PR` 创建前的统一审查结论和摘要。
+对单个 `Sprint` reviewer 结果做校验、归一和稳定结论收口，形成 `Sprint PR` 创建前的统一审查结论和摘要。
 
 ## Reads
 
@@ -18,10 +18,10 @@
 
 ## In Scope
 
-- 聚合 `Sprint` reviewer findings
+- 校验 `Sprint` reviewer 结果
 - 输出 `Sprint PR` 前置审查结论
 - 生成 `Sprint` 级结构化摘要
-- 补充 Sprint review 聚合测试
+- 补充 Sprint review 收口测试
 
 ## Out of Scope
 
@@ -31,15 +31,15 @@
 
 ## Deliverables
 
-- Sprint review 聚合实现
-- 聚合结果摘要与测试
+- Sprint review 结果收口实现
+- 审查结果摘要与测试
 
 ## Acceptance Criteria
 
 - 输出结构符合 `TECH-V1.md`
-- 审查聚合结果可被 `sprint-pr-tool` 直接消费
-- 冲突和阻塞 finding 不会被静默吞掉
+- 审查结果可被 `sprint-pr-tool` 直接消费
+- reviewer escalation 和阻塞 finding 不会被静默吞掉
 
 ## Notes
 
-- 本任务只做审查聚合，不隐式承担 `Sprint PR` 创建职责
+- 本任务只做单 reviewer 审查结果收口，不隐式承担 `Sprint PR` 创建职责

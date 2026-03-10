@@ -16,6 +16,7 @@ import (
 	"quick-ai-toolhub/internal/agentrun"
 	"quick-ai-toolhub/internal/app"
 	sharedconfig "quick-ai-toolhub/internal/config"
+	"quick-ai-toolhub/internal/reviewagg"
 	"quick-ai-toolhub/internal/worktreeprep"
 )
 
@@ -43,6 +44,14 @@ func (f fakePrepareWorktreeExecutor) Execute(ctx context.Context, req worktreepr
 	return f.execute(ctx, req, opts)
 }
 
+type fakeReviewResultExecutor struct {
+	execute func(context.Context, reviewagg.Request) reviewagg.Response
+}
+
+func (f fakeReviewResultExecutor) Execute(ctx context.Context, req reviewagg.Request) reviewagg.Response {
+	return f.execute(ctx, req)
+}
+
 func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 	orig := newRunTaskExecutor
 	t.Cleanup(func() { newRunTaskExecutor = orig })
@@ -66,6 +75,9 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 				}
 				if !opts.IsolatedCodexHome {
 					t.Fatal("expected isolated codex home to be enabled")
+				}
+				if opts.Runner != "" {
+					t.Fatalf("expected runner override to be empty, got %s", opts.Runner)
 				}
 				return agentrun.Result{
 					Runner:     agentrun.RunnerCodexExec,
@@ -96,7 +108,7 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 	output := stdout.String()
 	for _, needle := range []string{
 		"Task: Sprint-04/Task-01",
-		"Runner: codex_exec",
+		"Runner: codex-cli",
 		"Status: success",
 		"Next: proceed",
 		"Summary:",
@@ -107,6 +119,38 @@ func TestRunTaskOutputsHumanReadableResult(t *testing.T) {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %q in output:\n%s", needle, output)
 		}
+	}
+}
+
+func TestRunTaskPassesRunnerOverride(t *testing.T) {
+	orig := newRunTaskExecutor
+	t.Cleanup(func() { newRunTaskExecutor = orig })
+	newRunTaskExecutor = func() runTaskExecutor {
+		return fakeRunTaskExecutor{
+			run: func(_ context.Context, opts agentrun.RunOptions) (agentrun.Result, error) {
+				if opts.Runner != agentrun.RunnerClaudeCLI {
+					t.Fatalf("unexpected runner: %s", opts.Runner)
+				}
+				return agentrun.Result{
+					Runner:     agentrun.RunnerClaudeCLI,
+					Status:     "success",
+					Summary:    "done",
+					NextAction: "proceed",
+				}, nil
+			},
+		}
+	}
+
+	var stdout bytes.Buffer
+	if err := run(context.Background(), []string{
+		"run-task", "Sprint-04/Task-01",
+		"--runner", "claude-cli",
+	}, &stdout, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Runner: claude-cli") {
+		t.Fatalf("missing runner in output:\n%s", stdout.String())
 	}
 }
 
@@ -164,6 +208,9 @@ func TestRunAgentToolOutputsJSONResponse(t *testing.T) {
 				if opts.WorkDir == "" {
 					t.Fatal("expected workdir")
 				}
+				if req.Runner != agentrun.RunnerClaudeCLI {
+					t.Fatalf("unexpected runner: %s", req.Runner)
+				}
 				return agentrun.Response{
 					OK: true,
 					Data: &agentrun.Result{
@@ -182,6 +229,7 @@ func TestRunAgentToolOutputsJSONResponse(t *testing.T) {
 		"run-agent-tool",
 		"--task-id", "Sprint-04/Task-01",
 		"--timeout-seconds", "90",
+		"--runner", "claude-cli",
 	}, &stdout, &bytes.Buffer{}); err != nil {
 		t.Fatalf("run returned error: %v", err)
 	}
@@ -192,6 +240,25 @@ func TestRunAgentToolOutputsJSONResponse(t *testing.T) {
 	}
 	if !response.OK || response.Data == nil || response.Data.Runner != agentrun.RunnerCodexExec {
 		t.Fatalf("unexpected response: %s", stdout.String())
+	}
+}
+
+func TestRunTaskRejectsUnsupportedRunner(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run(context.Background(), []string{
+		"run-task", "Sprint-04/Task-01",
+		"--runner", "bad-runner",
+	}, &stdout, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected cli exit error")
+	}
+
+	var exitErr *cliExitError
+	if !errors.As(err, &exitErr) || exitErr.code != 2 {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	if !strings.Contains(stdout.String(), `unsupported runner "bad-runner"`) {
+		t.Fatalf("unexpected output:\n%s", stdout.String())
 	}
 }
 
@@ -235,10 +302,148 @@ func TestRunTaskHelpIncludesContextFlags(t *testing.T) {
 		t.Fatalf("run help: %v", err)
 	}
 	output := stdout.String()
-	for _, needle := range []string{"toolhub serve", "github-sync-tool", "prepare-worktree-tool", "run-agent-tool", "--sprint-id", "--task-id", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--yolo", "--isolated-codex-home", "--timeout-seconds", "--no-progress"} {
+	for _, needle := range []string{"toolhub serve", "github-sync-tool", "prepare-worktree-tool", "review-result-tool", "run-agent-tool", "--sprint-id", "--task-id", "full_reconcile", "--lens", "--github-pr-number", "--context-log", "--config-file", "--runner", "--yolo", "--isolated-codex-home", "--timeout-seconds", "--no-progress"} {
 		if !strings.Contains(output, needle) {
 			t.Fatalf("missing %s in help output:\n%s", needle, output)
 		}
+	}
+}
+
+func TestRunReviewResultToolOutputsJSONResponse(t *testing.T) {
+	orig := newReviewResultExecutor
+	t.Cleanup(func() { newReviewResultExecutor = orig })
+	newReviewResultExecutor = func() reviewResultExecutor {
+		return fakeReviewResultExecutor{
+			execute: func(_ context.Context, req reviewagg.Request) reviewagg.Response {
+				if req.TaskID != "Sprint-04/Task-03" {
+					t.Fatalf("unexpected task id: %s", req.TaskID)
+				}
+				if req.ReviewResult.ReviewerID != "reviewer-correctness" {
+					t.Fatalf("unexpected request: %+v", req)
+				}
+				return reviewagg.Response{
+					OK: true,
+					Data: &reviewagg.ResponseData{
+						ReviewFindings: []agentrun.Finding{
+							{
+								ReviewerID:         "reviewer-correctness",
+								Lens:               "correctness",
+								Severity:           "high",
+								Confidence:         "high",
+								Category:           "correctness",
+								FileRefs:           []string{"internal/reviewagg/service.go"},
+								Summary:            "blocking review finding",
+								Evidence:           "same issue reproduced by multiple reviewers",
+								FindingFingerprint: "review:blocking",
+								SuggestedAction:    "fix the blocker",
+							},
+						},
+						Decision:           reviewagg.DecisionRequestChanges,
+						Summary:            "decision=request_changes; review_findings=1; blocking finding present",
+						HasBlockingFinding: true,
+					},
+				}
+			},
+		}
+	}
+
+	var stdout bytes.Buffer
+	err := runReviewResultTool(
+		context.Background(),
+		nil,
+		strings.NewReader(`{"task_id":"Sprint-04/Task-03","review_result":{"reviewer_id":"reviewer-correctness","lens":"correctness","status":"request_changes","findings":[{"reviewer_id":"reviewer-correctness","lens":"correctness","severity":"high","confidence":"medium","category":"correctness","file_refs":["internal/reviewagg/service.go"],"summary":"blocking review finding","evidence":"same issue reproduced by the reviewer","finding_fingerprint":"review:blocking","suggested_action":"fix the blocker"}]}}`),
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("run review-result-tool: %v", err)
+	}
+
+	var response reviewagg.Response
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !response.OK || response.Data == nil {
+		t.Fatalf("unexpected response: %s", stdout.String())
+	}
+	if response.Data.Decision != reviewagg.DecisionRequestChanges || !response.Data.HasBlockingFinding {
+		t.Fatalf("unexpected review result payload: %+v", response.Data)
+	}
+}
+
+func TestRunReviewResultToolPassUsesEmptyReviewFindingsArray(t *testing.T) {
+	var stdout bytes.Buffer
+	err := runReviewResultTool(
+		context.Background(),
+		nil,
+		strings.NewReader(`{"task_id":"Sprint-04/Task-03","review_result":{"reviewer_id":"reviewer-correctness","lens":"correctness","status":"pass"}}`),
+		&stdout,
+	)
+	if err != nil {
+		t.Fatalf("run review-result-tool: %v", err)
+	}
+	var response reviewagg.Response
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !response.OK || response.Data == nil {
+		t.Fatalf("unexpected response: %s", stdout.String())
+	}
+	if response.Data.ReviewFindings == nil || len(response.Data.ReviewFindings) != 0 {
+		t.Fatalf("expected empty review_findings slice, got %+v", response.Data.ReviewFindings)
+	}
+}
+
+func TestRunReviewResultToolInvalidRequestReturnsExitCodeTwo(t *testing.T) {
+	testCases := []struct {
+		name  string
+		args  []string
+		stdin string
+	}{
+		{
+			name:  "invalid review status",
+			stdin: `{"task_id":"Sprint-04/Task-03","review_result":{"reviewer_id":"reviewer-a","lens":"correctness","status":"ship_it"}}`,
+		},
+		{
+			name:  "mismatched sprint id",
+			stdin: `{"task_id":"Sprint-04/Task-03","sprint_id":"Sprint-99","review_result":{"reviewer_id":"reviewer-a","lens":"correctness","status":"pass"}}`,
+		},
+		{
+			name:  "pass with findings",
+			stdin: `{"task_id":"Sprint-04/Task-03","review_result":{"reviewer_id":"reviewer-a","lens":"correctness","status":"pass","findings":[{"reviewer_id":"reviewer-a","lens":"correctness","severity":"low","confidence":"high","category":"correctness","file_refs":["internal/reviewagg/service.go"],"summary":"unexpected finding","evidence":"review still found an issue","finding_fingerprint":"review:pass-with-finding","suggested_action":"remove contradiction"}]}}`,
+		},
+		{
+			name:  "empty stdin",
+			stdin: "",
+		},
+		{
+			name:  "unexpected positional arg",
+			args:  []string{"extra"},
+			stdin: `{"task_id":"Sprint-04/Task-03","review_result":{"reviewer_id":"reviewer-a","lens":"correctness","status":"pass"}}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			err := runReviewResultTool(context.Background(), tc.args, strings.NewReader(tc.stdin), &stdout)
+			if err == nil {
+				t.Fatal("expected cli exit error")
+			}
+
+			var exitErr *cliExitError
+			if !errors.As(err, &exitErr) || exitErr.code != 2 {
+				t.Fatalf("unexpected error type: %v", err)
+			}
+
+			var response reviewagg.Response
+			if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if response.OK || response.Error == nil || response.Error.Code != reviewagg.ErrorCodeInvalid {
+				t.Fatalf("unexpected invalid response: %s", stdout.String())
+			}
+		})
 	}
 }
 

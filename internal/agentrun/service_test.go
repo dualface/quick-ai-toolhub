@@ -96,6 +96,60 @@ func TestRunTaskCodexExec(t *testing.T) {
 	}
 }
 
+func TestRunTaskClaudeCLIUsesConfiguredRunner(t *testing.T) {
+	repo := setupTestRepo(t)
+	mustWriteFile(t, filepath.Join(repo, "config/config.yaml"), strings.TrimSpace(`
+repo:
+  github_owner: example-owner
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
+default_model: claude-sonnet-4-5
+
+agents:
+  developer:
+    runner: claude-cli
+    template_file: prompts/agents/developer.md
+  qa:
+    template_file: prompts/agents/qa.md
+  reviewer:
+    template_file: prompts/agents/reviewer.md
+`)+"\n")
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			args := strings.Join(req.Args, " ")
+			if !strings.Contains(args, "claude -p ") {
+				t.Fatalf("unexpected claude args: %s", args)
+			}
+			if !strings.Contains(args, "--permission-mode acceptEdits") {
+				t.Fatalf("expected claude permission mode, got %s", args)
+			}
+			payload := `{"status":"success","summary":"implemented","next_action":"proceed","failure_fingerprint":null,"artifact_refs":null,"findings":[]}`
+			return CommandResult{Stdout: []byte(payload)}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	if result.Runner != RunnerClaudeCLI {
+		t.Fatalf("unexpected runner: %s", result.Runner)
+	}
+}
+
 func TestRunTaskExplicitModelOverridesConfig(t *testing.T) {
 	repo := setupTestRepo(t)
 	runner := &fakeCommandRunner{
@@ -462,7 +516,7 @@ func TestRunTaskRunnerFailureWithValidPayloadReturnsRunnerFailure(t *testing.T) 
 	if result.FailureFingerprint != ErrorCodeRunnerExecution {
 		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
 	}
-	if result.Summary != "codex_exec failed before producing a structured result" {
+	if result.Summary != "codex-cli failed before producing a structured result" {
 		t.Fatalf("unexpected summary: %s", result.Summary)
 	}
 }
@@ -721,6 +775,113 @@ func TestRunTaskRejectsInvalidReviewerFindingPayload(t *testing.T) {
 	}
 }
 
+func TestRunTaskReviewerNormalizesStatusAndPreservesDuplicateFindings(t *testing.T) {
+	t.Parallel()
+
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"completed_with_findings","summary":"review found issues","next_action":"needs_changes","failure_fingerprint":null,"artifact_refs":null,"findings":[{"reviewer_id":"reviewer-correctness","lens":"correctness","severity":"medium","confidence":"low","category":"correctness","file_refs":["internal/reviewagg/service.go"],"summary":"duplicate finding","evidence":"first copy","finding_fingerprint":"review:duplicate","suggested_action":"fix duplicate"},{"reviewer_id":"reviewer-correctness","lens":"correctness","severity":"high","confidence":"high","category":"correctness","file_refs":["internal/reviewagg/model.go"],"summary":"duplicate finding","evidence":"stronger copy","finding_fingerprint":"review:duplicate","suggested_action":"fix duplicate"}]}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	executor.now = func() time.Time {
+		return time.Date(2026, 3, 6, 12, 5, 0, 0, time.UTC)
+	}
+	executor.runID = func() string { return "runid123" }
+
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentReviewer,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "request_changes" {
+		t.Fatalf("expected normalized reviewer status, got %s", result.Status)
+	}
+	if len(result.Findings) != 2 {
+		t.Fatalf("expected duplicate reviewer findings to be preserved, got %+v", result.Findings)
+	}
+	if got := result.Findings[0]; got.Severity != "medium" || got.Confidence != "low" || len(got.FileRefs) != 1 {
+		t.Fatalf("expected first reviewer finding to remain unchanged, got %+v", got)
+	}
+}
+
+func TestRunTaskReviewerRejectsRequestChangesWithoutFindings(t *testing.T) {
+	t.Parallel()
+
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"request_changes","summary":"review found issues","next_action":"needs_changes","failure_fingerprint":null,"artifact_refs":null,"findings":[]}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentReviewer,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" || result.FailureFingerprint != ErrorCodeMalformedOutput {
+		t.Fatalf("expected malformed reviewer result, got %+v", result)
+	}
+}
+
+func TestRunTaskReviewerRejectsPassWithFindings(t *testing.T) {
+	t.Parallel()
+
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"pass","summary":"review passed","next_action":"done","failure_fingerprint":null,"artifact_refs":null,"findings":[{"reviewer_id":"reviewer-correctness","lens":"correctness","severity":"low","confidence":"high","category":"correctness","file_refs":["internal/reviewagg/service.go"],"summary":"unexpected finding","evidence":"reviewer still reported an issue","finding_fingerprint":"review:pass-with-finding","suggested_action":"remove contradiction"}]}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentReviewer,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" || result.FailureFingerprint != ErrorCodeMalformedOutput {
+		t.Fatalf("expected malformed reviewer result, got %+v", result)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("expected malformed reviewer result to clear findings, got %+v", result.Findings)
+	}
+}
+
 func TestBuildCommandAddsWritableDirOutsideWorktree(t *testing.T) {
 	req, err := buildCommand(
 		RunOptions{WorkDir: "/repo", AgentType: AgentDeveloper},
@@ -752,6 +913,71 @@ func TestBuildCommandSkipsWritableDirInsideWorktree(t *testing.T) {
 	args := strings.Join(req.Args, " ")
 	if strings.Contains(args, "--add-dir") {
 		t.Fatalf("did not expect add-dir for in-worktree output root, got %s", args)
+	}
+}
+
+func TestBuildCommandClaudeUsesJsonSchemaAndPermissionMode(t *testing.T) {
+	schemaDir := t.TempDir()
+	schemaPath := filepath.Join(schemaDir, "output-schema.json")
+	if err := os.WriteFile(schemaPath, []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+
+	req, err := buildCommand(
+		RunOptions{WorkDir: "/repo", AgentType: AgentDeveloper, Runner: RunnerClaudeCLI, Model: "claude-sonnet-4-5"},
+		"prompt body",
+		schemaPath,
+		"/tmp/toolhub/last-message.json",
+	)
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+
+	args := strings.Join(req.Args, " ")
+	for _, needle := range []string{
+		"claude -p prompt body",
+		"--output-format stream-json",
+		"--verbose",
+		"--print",
+		"--permission-mode acceptEdits",
+		"--model claude-sonnet-4-5",
+		"--json-schema {\"type\":\"object\"}",
+	} {
+		if !strings.Contains(args, needle) {
+			t.Fatalf("missing %q in claude command: %s", needle, args)
+		}
+	}
+	if strings.Contains(args, "--cwd") {
+		t.Fatalf("did not expect --cwd in claude command: %s", args)
+	}
+	if len(req.Stdin) != 0 {
+		t.Fatalf("expected claude command to pass prompt as arg, got stdin %q", string(req.Stdin))
+	}
+}
+
+func TestBuildCommandClaudeYoloSkipsPermissionMode(t *testing.T) {
+	schemaDir := t.TempDir()
+	schemaPath := filepath.Join(schemaDir, "output-schema.json")
+	if err := os.WriteFile(schemaPath, []byte(`{"type":"object"}`), 0o644); err != nil {
+		t.Fatalf("write schema: %v", err)
+	}
+
+	req, err := buildCommand(
+		RunOptions{WorkDir: "/repo", AgentType: AgentReviewer, Runner: RunnerClaudeCLI, Yolo: true},
+		"prompt",
+		schemaPath,
+		"/tmp/toolhub/last-message.json",
+	)
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+
+	args := strings.Join(req.Args, " ")
+	if !strings.Contains(args, "--dangerously-skip-permissions") {
+		t.Fatalf("expected claude yolo flag, got %s", args)
+	}
+	if strings.Contains(args, "--permission-mode") {
+		t.Fatalf("did not expect permission mode in yolo claude command, got %s", args)
 	}
 }
 
@@ -838,7 +1064,7 @@ func TestCommandEnvKeysIncludeHomeOnlyForIsolatedDeveloperRuns(t *testing.T) {
 
 func TestRunnerFailureSummaryIncludesCodexRuntimeHint(t *testing.T) {
 	stderr := []byte("WARNING: proceeding, even though we could not update PATH: Permission denied (os error 13) at path \"/home/work/.codex/tmp/arg0/codex-arg0abcd\"")
-	got := runnerFailureSummary(stderr)
+	got := runnerFailureSummary(RunnerCodexExec, stderr)
 	if !strings.Contains(got, "~/.codex/tmp/arg0") {
 		t.Fatalf("expected runtime hint in summary, got %q", got)
 	}
@@ -1359,7 +1585,7 @@ func TestBuildPromptPreservesInlineCodeAndUsesRelativeTaskSource(t *testing.T) {
 		Goal:               "Goal",
 		Reads:              []string{"`TECH-V1.md`"},
 		InScope:            []string{"收集结构化结果和 `artifact_refs`"},
-		AcceptanceCriteria: []string{"默认 runner 为 `codex_exec`"},
+		AcceptanceCriteria: []string{"默认 runner 为 `codex-cli`"},
 		Source:             "/repo/plan/tasks/Sprint-04/Task-01.md",
 	}
 	sprint := &issuesync.Sprint{ID: "Sprint-04", Goal: "Sprint Goal"}
@@ -1375,7 +1601,7 @@ func TestBuildPromptPreservesInlineCodeAndUsesRelativeTaskSource(t *testing.T) {
 	if !strings.Contains(prompt, "收集结构化结果和 `artifact_refs`") {
 		t.Fatalf("expected inline code to be preserved, got:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "默认 runner 为 `codex_exec`") {
+	if !strings.Contains(prompt, "默认 runner 为 `codex-cli`") {
 		t.Fatalf("expected inline code in acceptance criteria, got:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "Lens: delivery") {
@@ -1491,19 +1717,19 @@ func TestBuildPromptDeveloperIncludesToolContractExcerpt(t *testing.T) {
 	mustWriteFile(t, filepath.Join(repo, "TECH-V1.md"), strings.Join([]string{
 		"# TECH-V1",
 		"",
-		"### `review-aggregation-tool`",
+		"### `review-result-tool`",
 		"",
 		"```yaml",
 		"request:",
 		"  task_id: string",
-		"  review_results:",
-		"    - reviewer_id: string",
-		"      lens: string",
-		"      status: string",
-		"      findings: [finding]",
+		"  review_result:",
+		"    reviewer_id: string",
+		"    lens: string",
+		"    status: string",
+		"    findings: [finding]",
 		"",
 		"response.data:",
-		"  aggregated_findings: [finding]",
+		"  review_findings: [finding]",
 		"  decision: pass | request_changes | awaiting_human",
 		"  summary: string",
 		"```",
@@ -1519,8 +1745,8 @@ func TestBuildPromptDeveloperIncludesToolContractExcerpt(t *testing.T) {
 
 	task := &issuesync.TaskBrief{
 		TaskID:             "Sprint-04/Task-03",
-		Title:              "实现 review-aggregation-tool",
-		Goal:               "实现纯聚合的 `review-aggregation-tool`。",
+		Title:              "实现 review-result-tool",
+		Goal:               "实现单 reviewer 的 `review-result-tool`。",
 		Reads:              []string{"TECH-V1.md"},
 		AcceptanceCriteria: []string{"输出结构符合 `TECH-V1.md`"},
 		Source:             filepath.Join(repo, "plan/tasks/Sprint-04/Task-03.md"),
@@ -1533,11 +1759,11 @@ func TestBuildPromptDeveloperIncludesToolContractExcerpt(t *testing.T) {
 	}, repo, "")
 
 	for _, needle := range []string{
-		"Preserve the public request/response contract defined in `TECH-V1.md` for `review-aggregation-tool`;",
+		"Preserve the public request/response contract defined in `TECH-V1.md` for `review-result-tool`;",
 		"- Relevant Spec Excerpts:",
-		"TECH-V1 `review-aggregation-tool` contract:",
+		"TECH-V1 `review-result-tool` contract:",
 		"task_id: string",
-		"aggregated_findings: [finding]",
+		"review_findings: [finding]",
 	} {
 		if !strings.Contains(prompt, needle) {
 			t.Fatalf("missing %q in prompt:\n%s", needle, prompt)

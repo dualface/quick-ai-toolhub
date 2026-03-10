@@ -19,6 +19,7 @@ import (
 	"quick-ai-toolhub/internal/githubsync"
 	"quick-ai-toolhub/internal/issuesync"
 	"quick-ai-toolhub/internal/logging"
+	"quick-ai-toolhub/internal/reviewagg"
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/tasklist"
 	"quick-ai-toolhub/internal/worktreeprep"
@@ -36,6 +37,10 @@ type prepareWorktreeExecutor interface {
 	Execute(context.Context, worktreeprep.Request, worktreeprep.ExecuteOptions) worktreeprep.Response
 }
 
+type reviewResultExecutor interface {
+	Execute(context.Context, reviewagg.Request) reviewagg.Response
+}
+
 var newRunTaskExecutor = func() runTaskExecutor {
 	return agentrun.NewExecutor(agentrun.ExecCommandRunner{})
 }
@@ -46,6 +51,10 @@ var newRunAgentExecutor = func() runAgentExecutor {
 
 var newPrepareWorktreeExecutor = func() prepareWorktreeExecutor {
 	return worktreeprep.New(worktreeprep.Dependencies{})
+}
+
+var newReviewResultExecutor = func() reviewResultExecutor {
+	return reviewagg.New()
 }
 
 var runServeApplication = func(ctx context.Context, application *app.Application) error {
@@ -89,6 +98,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runGetTaskList(ctx, args[1:], stdout)
 	case "prepare-worktree", "prepare-worktree-tool":
 		return runPrepareWorktree(ctx, args[1:], stdout)
+	case "review-result-tool", "review-aggregation-tool":
+		return runReviewResultTool(ctx, args[1:], os.Stdin, stdout)
 	case "run-agent-tool":
 		return runRunAgentTool(ctx, args[1:], stdout, stderr)
 	case "run-task":
@@ -107,6 +118,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  toolhub github-sync-tool <op> [flags]")
 	fmt.Fprintln(w, "  toolhub get-task-list-tool [flags]")
 	fmt.Fprintln(w, "  toolhub prepare-worktree-tool [flags]")
+	fmt.Fprintln(w, "  toolhub review-result-tool")
 	fmt.Fprintln(w, "  toolhub run-agent-tool [flags]")
 	fmt.Fprintln(w, "  toolhub run-task <task-id> [flags]")
 	fmt.Fprintln(w)
@@ -115,6 +127,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  github-sync-tool      Reconcile GitHub issues / PRs / CI into SQLite projections.")
 	fmt.Fprintln(w, "  get-task-list-tool    Read projected Sprint/Task state and report scheduling blockers.")
 	fmt.Fprintln(w, "  prepare-worktree-tool Create or reuse the Sprint/task branches and task worktree.")
+	fmt.Fprintln(w, "  review-result-tool    Validate one reviewer result and emit the stable review contract.")
 	fmt.Fprintln(w, "  run-agent-tool        Run an agent and emit the standard tool JSON envelope.")
 	fmt.Fprintln(w, "  run-task              Run the same agent flow with human-readable output by default.")
 	fmt.Fprintln(w)
@@ -148,6 +161,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --config-file           Path to the repository config file. Defaults to CONFIG_FILE or config/config.yaml.")
 	fmt.Fprintln(w, "  --workdir               Repository worktree for config discovery and git operations.")
 	fmt.Fprintln(w)
+	fmt.Fprintln(w, "review-result-tool:")
+	fmt.Fprintln(w, "  Reads a JSON request from stdin and emits the standard tool JSON envelope.")
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "run-agent-tool / run-task Flags:")
 	fmt.Fprintln(w, "  --task-id               Optional task id flag; run-task also accepts a positional task id.")
 	fmt.Fprintln(w, "  --agent-type            developer | qa | reviewer")
@@ -165,6 +181,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --timeout               Timeout duration, e.g. 30m.")
 	fmt.Fprintln(w, "  --timeout-seconds       Timeout in whole seconds; matches the tool request schema.")
 	fmt.Fprintln(w, "  --model                 Optional runner model override.")
+	fmt.Fprintln(w, "  --runner                Optional runner override (`codex-cli` or `claude-cli`).")
 	fmt.Fprintln(w, "  --yolo                  Bypass approvals and sandbox for codex.")
 	fmt.Fprintln(w, "  --isolated-codex-home   Developer/qa only: redirect codex HOME into .toolhub/runtime/home.")
 	fmt.Fprintln(w, "  --stream                Stream live agent output to stderr.")
@@ -580,6 +597,46 @@ func runPrepareWorktree(ctx context.Context, args []string, stdout io.Writer) er
 	return writePrepareWorktreeResponse(stdout, response)
 }
 
+func runReviewResultTool(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("review-result-tool", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	if err := fs.Parse(args); err != nil {
+		return writeReviewResultResponse(stdout, reviewagg.Response{
+			OK: false,
+			Error: &reviewagg.ToolError{
+				Code:      reviewagg.ErrorCodeInvalid,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		})
+	}
+	if fs.NArg() != 0 {
+		return writeReviewResultResponse(stdout, reviewagg.Response{
+			OK: false,
+			Error: &reviewagg.ToolError{
+				Code:      reviewagg.ErrorCodeInvalid,
+				Message:   "review-result-tool does not accept positional arguments",
+				Retryable: false,
+			},
+		})
+	}
+
+	request, err := readReviewResultRequest(stdin)
+	if err != nil {
+		return writeReviewResultResponse(stdout, reviewagg.Response{
+			OK: false,
+			Error: &reviewagg.ToolError{
+				Code:      reviewagg.ErrorCodeInvalid,
+				Message:   err.Error(),
+				Retryable: false,
+			},
+		})
+	}
+
+	return writeReviewResultResponse(stdout, newReviewResultExecutor().Execute(ctx, request))
+}
+
 func readGitHubSyncRequest(r io.Reader) (githubsync.Request, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -592,6 +649,22 @@ func readGitHubSyncRequest(r io.Reader) (githubsync.Request, error) {
 	var request githubsync.Request
 	if err := json.Unmarshal(data, &request); err != nil {
 		return githubsync.Request{}, fmt.Errorf("decode github-sync-tool request: %w", err)
+	}
+	return request, nil
+}
+
+func readReviewResultRequest(r io.Reader) (reviewagg.Request, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return reviewagg.Request{}, fmt.Errorf("read review-result-tool request: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return reviewagg.Request{}, errors.New("review-result-tool requires a JSON request on stdin")
+	}
+
+	var request reviewagg.Request
+	if err := json.Unmarshal(data, &request); err != nil {
+		return reviewagg.Request{}, fmt.Errorf("decode review-result-tool request: %w", err)
 	}
 	return request, nil
 }
@@ -635,6 +708,7 @@ func runAgentCommand(ctx context.Context, commandName string, args []string, std
 	fs.StringVar(&opts.OutputRoot, "output-root", ".toolhub/runs", "root directory for run artifacts")
 	fs.DurationVar(&timeout, "timeout", 0, "runner timeout")
 	fs.IntVar(&timeoutSeconds, "timeout-seconds", 0, "runner timeout in seconds")
+	fs.StringVar((*string)(&opts.Runner), "runner", "", "runner override (codex-cli or claude-cli)")
 	fs.StringVar(&opts.Model, "model", "", "optional model override")
 	fs.BoolVar(&opts.Yolo, "yolo", false, "bypass approvals and sandbox for codex")
 	fs.BoolVar(&opts.IsolatedCodexHome, "isolated-codex-home", false, "developer/qa only: redirect codex HOME into .toolhub/runtime/home")
@@ -678,6 +752,15 @@ func runAgentCommand(ctx context.Context, commandName string, args []string, std
 			Retryable: false,
 		}, 2, structuredOutput || stream)
 	}
+	switch opts.Runner {
+	case "", agentrun.RunnerCodexExec, agentrun.RunnerClaudeCLI:
+	default:
+		return writeErrorResponse(stdout, &agentrun.ToolError{
+			Code:      agentrun.ErrorCodeInvalidRequest,
+			Message:   fmt.Sprintf("unsupported runner %q", opts.Runner),
+			Retryable: false,
+		}, 2, structuredOutput || stream)
+	}
 	opts.TaskID = taskID
 	if timeoutSeconds > 0 {
 		opts.Timeout = time.Duration(timeoutSeconds) * time.Second
@@ -703,6 +786,7 @@ func runAgentCommand(ctx context.Context, commandName string, args []string, std
 			TaskID:         opts.TaskID,
 			Attempt:        opts.Attempt,
 			Lens:           opts.Lens,
+			Runner:         opts.Runner,
 			Model:          opts.Model,
 			ConfigFile:     opts.ConfigFile,
 			TimeoutSeconds: timeoutSeconds,
@@ -782,6 +866,23 @@ func writePrepareWorktreeResponse(stdout io.Writer, response worktreeprep.Respon
 
 	exitCode := 1
 	if response.Error != nil && response.Error.Code == worktreeprep.ErrorCodeInvalid {
+		exitCode = 2
+	}
+	return &cliExitError{code: exitCode}
+}
+
+func writeReviewResultResponse(stdout io.Writer, response reviewagg.Response) error {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(response); err != nil {
+		return err
+	}
+	if response.OK {
+		return nil
+	}
+
+	exitCode := 1
+	if response.Error != nil && response.Error.Code == reviewagg.ErrorCodeInvalid {
 		exitCode = 2
 	}
 	return &cliExitError{code: exitCode}

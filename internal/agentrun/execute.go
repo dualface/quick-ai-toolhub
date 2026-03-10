@@ -35,6 +35,7 @@ func (e *Executor) Execute(ctx context.Context, req Request, opts ExecuteOptions
 		AgentType:         req.AgentType,
 		Attempt:           req.Attempt,
 		Lens:              req.Lens,
+		Runner:            req.Runner,
 		ContextRefs:       req.ContextRefs,
 		ConfigFile:        req.ConfigFile,
 		PlanFile:          opts.PlanFile,

@@ -9,7 +9,8 @@ import (
 type RunnerID string
 
 const (
-	RunnerCodexExec RunnerID = "codex_exec"
+	RunnerCodexExec RunnerID = "codex-cli"
+	RunnerClaudeCLI RunnerID = "claude-cli"
 )
 
 type AgentType string
@@ -25,6 +26,7 @@ type Request struct {
 	TaskID         string      `json:"task_id"`
 	Attempt        int         `json:"attempt"`
 	Lens           string      `json:"lens,omitempty"`
+	Runner         RunnerID    `json:"runner,omitempty"`
 	Model          string      `json:"model,omitempty"`
 	ConfigFile     string      `json:"config_file,omitempty"`
 	TimeoutSeconds int         `json:"timeout_seconds,omitempty"`
@@ -43,6 +45,7 @@ type RunOptions struct {
 	WorkDir           string
 	OutputRoot        string
 	Model             string
+	Runner            RunnerID
 	Yolo              bool
 	IsolatedCodexHome bool
 	Timeout           time.Duration

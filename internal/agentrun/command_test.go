@@ -77,6 +77,37 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 	}
 }
 
+func TestExecCommandRunnerProgressWriterSummarizesClaudeStreamJSON(t *testing.T) {
+	var progress bytes.Buffer
+
+	runner := ExecCommandRunner{}
+	result, err := runner.Run(context.Background(), CommandRequest{
+		Args: []string{"sh", "-c", "printf '%s\n' " +
+			"'{\"type\":\"system\",\"subtype\":\"init\"}' " +
+			"'{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"StructuredOutput\"}]}}' " +
+			"'{\"type\":\"result\",\"subtype\":\"success\",\"structured_output\":{\"status\":\"success\",\"summary\":\"done\",\"next_action\":\"proceed\",\"failure_fingerprint\":null,\"artifact_refs\":{},\"findings\":[]}}'"},
+		ProgressWriter: &progress,
+	})
+	if err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+
+	if !strings.Contains(string(result.Stdout), `"type":"system"`) {
+		t.Fatalf("unexpected stdout capture: %q", string(result.Stdout))
+	}
+
+	got := progress.String()
+	for _, needle := range []string{
+		"[progress] agent started",
+		"[progress] using tool: StructuredOutput",
+		"[progress] agent finished",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing %q in progress output: %q", needle, got)
+		}
+	}
+}
+
 func TestExecCommandRunnerStreamOutputsMetadata(t *testing.T) {
 	var stream bytes.Buffer
 

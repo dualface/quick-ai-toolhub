@@ -17,6 +17,7 @@ type agentSettings struct {
 }
 
 type agentProfile struct {
+	Runner       RunnerID
 	Model        string
 	TemplateFile string
 	TemplateBody string
@@ -52,14 +53,17 @@ func loadAgentSettings(workdir, configFile string) (agentSettings, error) {
 		DefaultModel: cfg.DefaultModel,
 		Profiles: map[AgentType]agentProfile{
 			AgentDeveloper: {
+				Runner:       normalizeRunnerID(cfg.Agents.Developer.Runner),
 				Model:        cfg.Agents.Developer.Model,
 				TemplateFile: cfg.Agents.Developer.TemplateFile,
 			},
 			AgentQA: {
+				Runner:       normalizeRunnerID(cfg.Agents.QA.Runner),
 				Model:        cfg.Agents.QA.Model,
 				TemplateFile: cfg.Agents.QA.TemplateFile,
 			},
 			AgentReviewer: {
+				Runner:       normalizeRunnerID(cfg.Agents.Reviewer.Runner),
 				Model:        cfg.Agents.Reviewer.Model,
 				TemplateFile: cfg.Agents.Reviewer.TemplateFile,
 			},
@@ -83,11 +87,29 @@ func loadAgentSettings(workdir, configFile string) (agentSettings, error) {
 	return settings, nil
 }
 
+func normalizeRunnerID(value string) RunnerID {
+	switch strings.TrimSpace(value) {
+	case "", string(RunnerCodexExec):
+		return RunnerCodexExec
+	case string(RunnerClaudeCLI):
+		return RunnerClaudeCLI
+	default:
+		return RunnerCodexExec
+	}
+}
+
 func (s agentSettings) defaultModelFor(agentType AgentType) string {
 	if profile, ok := s.Profiles[agentType]; ok && profile.Model != "" {
 		return profile.Model
 	}
 	return s.DefaultModel
+}
+
+func (s agentSettings) runnerFor(agentType AgentType) RunnerID {
+	if profile, ok := s.Profiles[agentType]; ok && profile.Runner != "" {
+		return profile.Runner
+	}
+	return RunnerCodexExec
 }
 
 func (s agentSettings) roleInstructions(agentType AgentType, task *issuesync.TaskBrief, sprint *issuesync.Sprint, attempt int, lens string, contextRefs ContextRefs, workdir string) (string, error) {

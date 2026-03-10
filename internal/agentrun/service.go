@@ -58,14 +58,9 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	}
 
 	parser := issuesync.Parser{}
-	planData, err := parser.Load(opts.PlanFile, opts.TasksDir)
+	task, sprint, err := parser.LoadTask(opts.TasksDir, opts.TaskID)
 	if err != nil {
-		return Result{}, wrapToolError(ErrorCodePlanLoadFailed, false, "load plan data: %v", err)
-	}
-
-	task, sprint, err := findTask(planData, opts.TaskID)
-	if err != nil {
-		return Result{}, err
+		return Result{}, wrapToolError(ErrorCodePlanLoadFailed, false, "load task brief: %v", err)
 	}
 	applyDefaultContextRefs(&opts, sprint)
 	applyAutomaticFeedbackContextRefs(&opts, outputRoot)
@@ -73,6 +68,9 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	settings, err := loadAgentSettings(opts.WorkDir, opts.ConfigFile)
 	if err != nil {
 		return Result{}, err
+	}
+	if opts.Runner == "" {
+		opts.Runner = settings.runnerFor(opts.AgentType)
 	}
 	if opts.Model == "" {
 		opts.Model = settings.defaultModelFor(opts.AgentType)
@@ -122,7 +120,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	envKeys := commandEnvKeys(opts)
 	cmdReq.Metadata = CommandMetadata{
 		Model:       effectiveModel(opts),
-		Sandbox:     effectiveSandboxMode(opts),
+		Sandbox:     effectivePermissionMode(opts),
 		EnvKeys:     envKeys,
 		EnvSnapshot: envSnapshot(cmdReq.Env, envKeys...),
 	}
@@ -153,14 +151,17 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	}
 
 	result := Result{
-		Runner:    RunnerCodexExec,
+		Runner:    effectiveRunner(opts),
 		SessionID: extractSessionID(cmdResult.Stdout),
 	}
+	invalidStructuredSummary := fmt.Sprintf("%s did not return a valid structured result", result.Runner)
+	invalidReviewerSummary := fmt.Sprintf("%s did not return a valid structured reviewer result", result.Runner)
+	timeoutSummary := fmt.Sprintf("%s timed out before producing a structured result", result.Runner)
 
 	if runErr != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			result.Status = "timeout"
-			result.Summary = "codex_exec timed out before producing a structured result"
+			result.Summary = timeoutSummary
 			result.NextAction = "retry"
 			result.FailureFingerprint = ErrorCodeRunnerTimeout
 			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -173,7 +174,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 			if err := validatePayload(payload); err != nil {
 				if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
 					result.Status = "failed"
-					result.Summary = "codex_exec did not return a valid structured result"
+					result.Summary = invalidStructuredSummary
 					result.NextAction = "retry"
 					result.FailureFingerprint = ErrorCodeMalformedOutput
 					if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -184,7 +185,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 			}
 		} else if toolErr, ok := err.(*ToolError); ok && toolErr.Code == ErrorCodeMalformedOutput {
 			result.Status = "failed"
-			result.Summary = "codex_exec did not return a valid structured result"
+			result.Summary = invalidStructuredSummary
 			result.NextAction = "retry"
 			result.FailureFingerprint = ErrorCodeMalformedOutput
 			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -194,7 +195,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		}
 
 		result.Status = "failed"
-		result.Summary = runnerFailureSummary(cmdResult.Stderr)
+		result.Summary = runnerFailureSummary(effectiveRunner(opts), cmdResult.Stderr)
 		result.NextAction = "retry"
 		result.FailureFingerprint = ErrorCodeRunnerExecution
 		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -206,7 +207,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	payload, sessionID, err := parseRunnerOutput(lastMessagePath, cmdResult.Stdout)
 	if err != nil {
 		result.Status = "failed"
-		result.Summary = "codex_exec did not return a valid structured result"
+		result.Summary = invalidStructuredSummary
 		result.NextAction = "retry"
 		result.FailureFingerprint = ErrorCodeMalformedOutput
 		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -216,7 +217,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	}
 	if err := validatePayload(payload); err != nil {
 		result.Status = "failed"
-		result.Summary = "codex_exec did not return a valid structured result"
+		result.Summary = invalidStructuredSummary
 		result.NextAction = "retry"
 		result.FailureFingerprint = ErrorCodeMalformedOutput
 		if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
@@ -225,7 +226,22 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		return result, nil
 	}
 
-	result = resultFromPayload(payload, sessionID)
+	result = resultFromPayload(payload, sessionID, effectiveRunner(opts))
+	if opts.AgentType == AgentReviewer {
+		normalizedResult, err := normalizeReviewerResult(result)
+		if err != nil {
+			result.Status = "failed"
+			result.Summary = invalidReviewerSummary
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeMalformedOutput
+			result.Findings = nil
+			if persistErr := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); persistErr != nil {
+				return Result{}, persistErr
+			}
+			return result, nil
+		}
+		result = normalizedResult
+	}
 	if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
 		return Result{}, err
 	}
@@ -265,19 +281,6 @@ func validateOptions(opts *RunOptions) error {
 		return newToolError(ErrorCodeInvalidRequest, "isolated codex home is not supported for reviewer", false)
 	}
 	return nil
-}
-
-func findTask(plan *issuesync.PlanData, taskID string) (*issuesync.TaskBrief, *issuesync.Sprint, error) {
-	task, ok := plan.Tasks[taskID]
-	if !ok {
-		return nil, nil, wrapToolError(ErrorCodeTaskNotFound, false, "task %s not found", taskID)
-	}
-	for _, sprint := range plan.Sprints {
-		if sprint.ID == task.SprintID {
-			return task, sprint, nil
-		}
-	}
-	return nil, nil, wrapToolError(ErrorCodeTaskNotFound, false, "sprint %s not found for task %s", task.SprintID, taskID)
 }
 
 func applyDefaultContextRefs(opts *RunOptions, sprint *issuesync.Sprint) {
@@ -537,46 +540,12 @@ func parseAttemptDirName(name string) (int, bool) {
 }
 
 func buildCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) (CommandRequest, error) {
-	args := []string{"codex"}
-	if opts.Yolo {
-		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-	} else {
-		args = append(args, "--ask-for-approval", "never")
-		args = append(args, "--sandbox", codexSandbox(opts.AgentType))
+	switch effectiveRunner(opts) {
+	case RunnerClaudeCLI:
+		return buildClaudeCommand(opts, prompt, schemaPath)
+	default:
+		return buildCodexCommand(opts, prompt, schemaPath, lastMessagePath), nil
 	}
-	for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
-		args = append(args, "--add-dir", dir)
-	}
-	args = append(args,
-		"exec",
-		"--cd", opts.WorkDir,
-		"--output-schema", schemaPath,
-		"--json",
-		"-o", lastMessagePath,
-		"-",
-	)
-	if opts.Model != "" {
-		args = []string{"codex"}
-		if opts.Yolo {
-			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-		} else {
-			args = append(args, "--ask-for-approval", "never")
-			args = append(args, "--sandbox", codexSandbox(opts.AgentType))
-		}
-		for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
-			args = append(args, "--add-dir", dir)
-		}
-		args = append(args,
-			"--model", opts.Model,
-			"exec",
-			"--cd", opts.WorkDir,
-			"--output-schema", schemaPath,
-			"--json",
-			"-o", lastMessagePath,
-			"-",
-		)
-	}
-	return CommandRequest{Args: args, Stdin: []byte(prompt)}, nil
 }
 
 func effectiveModel(opts RunOptions) string {
@@ -586,11 +555,19 @@ func effectiveModel(opts RunOptions) string {
 	return opts.Model
 }
 
-func effectiveSandboxMode(opts RunOptions) string {
-	if opts.Yolo {
-		return "dangerously-bypass-approvals-and-sandbox"
+func effectivePermissionMode(opts RunOptions) string {
+	switch effectiveRunner(opts) {
+	case RunnerClaudeCLI:
+		if opts.Yolo {
+			return "dangerously-skip-permissions"
+		}
+		return claudePermissionMode(opts.AgentType)
+	default:
+		if opts.Yolo {
+			return "dangerously-bypass-approvals-and-sandbox"
+		}
+		return codexSandbox(opts.AgentType)
 	}
-	return codexSandbox(opts.AgentType)
 }
 
 func commandEnvKeys(opts RunOptions) []string {
@@ -643,6 +620,66 @@ func buildCommandEnv(workdir string, agentType AgentType, isolatedCodexHome bool
 	return env, nil
 }
 
+func buildCodexCommand(opts RunOptions, prompt, schemaPath, lastMessagePath string) CommandRequest {
+	args := []string{"codex"}
+	if opts.Yolo {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	} else {
+		args = append(args, "--ask-for-approval", "never")
+		args = append(args, "--sandbox", codexSandbox(opts.AgentType))
+	}
+	for _, dir := range additionalWritableDirs(opts.WorkDir, schemaPath, lastMessagePath) {
+		args = append(args, "--add-dir", dir)
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	args = append(args,
+		"exec",
+		"--cd", opts.WorkDir,
+		"--output-schema", schemaPath,
+		"--json",
+		"-o", lastMessagePath,
+		"-",
+	)
+	return CommandRequest{Args: args, Stdin: []byte(prompt)}
+}
+
+func buildClaudeCommand(opts RunOptions, prompt, schemaPath string) (CommandRequest, error) {
+	schemaBytes, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return CommandRequest{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "read schema %s: %v", schemaPath, err)
+	}
+
+	args := []string{"claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--print"}
+	if opts.Yolo {
+		args = append(args, "--dangerously-skip-permissions")
+	} else {
+		args = append(args, "--permission-mode", claudePermissionMode(opts.AgentType))
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	args = append(args, "--json-schema", string(schemaBytes))
+	return CommandRequest{Args: args}, nil
+}
+
+func effectiveRunner(opts RunOptions) RunnerID {
+	if opts.Runner == "" {
+		return RunnerCodexExec
+	}
+	return opts.Runner
+}
+
+func claudePermissionMode(agentType AgentType) string {
+	switch agentType {
+	case AgentReviewer:
+		return "plan"
+	default:
+		return "acceptEdits"
+	}
+}
+
 func resolveGoModCacheDir(workdir string, runtimeDir string) (string, error) {
 	primary := filepath.Join(runtimeDir, "go-mod-cache")
 	if err := os.MkdirAll(primary, 0o755); err != nil {
@@ -685,12 +722,12 @@ func dirHasEntries(path string) (bool, error) {
 	return len(entries) > 0, nil
 }
 
-func runnerFailureSummary(stderr []byte) string {
-	const defaultSummary = "codex_exec failed before producing a structured result"
+func runnerFailureSummary(runner RunnerID, stderr []byte) string {
+	defaultSummary := fmt.Sprintf("%s failed before producing a structured result", runner)
 
 	text := string(stderr)
 	if strings.Contains(text, ".codex/tmp/arg0") && strings.Contains(text, "Permission denied") {
-		return "codex_exec failed before producing a structured result; codex could not write its runtime temp dir under ~/.codex/tmp/arg0"
+		return "codex-cli failed before producing a structured result; codex could not write its runtime temp dir under ~/.codex/tmp/arg0"
 	}
 	return defaultSummary
 }
@@ -1093,9 +1130,9 @@ func buildRunDir(outputRoot, taskID string, agentType AgentType, lens string, at
 	)
 }
 
-func resultFromPayload(payload resultPayload, sessionID string) Result {
+func resultFromPayload(payload resultPayload, sessionID string, runner RunnerID) Result {
 	return Result{
-		Runner:             RunnerCodexExec,
+		Runner:             runner,
 		Status:             payload.Status,
 		Summary:            payload.Summary,
 		NextAction:         payload.NextAction,
