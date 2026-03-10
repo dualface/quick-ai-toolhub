@@ -14,8 +14,8 @@ default_model: gpt-5.4
 
 agents:
   developer:
-    runner: claude-cli
-    model: opus
+    # runner: claude-cli
+    # model: opus
     template_file: prompts/agents/developer.md
   qa:
     template_file: prompts/agents/qa.md
