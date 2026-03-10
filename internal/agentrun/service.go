@@ -2,6 +2,7 @@ package agentrun
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"quick-ai-toolhub/internal/issuesync"
@@ -26,6 +28,13 @@ type Executor struct {
 	runner CommandRunner
 	now    func() time.Time
 	runID  func() string
+}
+
+type rateLimitStreamWatcher struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	matched bool
+	cancel  context.CancelFunc
 }
 
 func NewExecutor(runner CommandRunner) *Executor {
@@ -125,21 +134,38 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 		EnvSnapshot: envSnapshot(cmdReq.Env, envKeys...),
 	}
 
+	stdoutPath := filepath.Join(runDir, "stdout.log")
+	stderrPath := filepath.Join(runDir, "stderr.log")
+	combinedLogPath := filepath.Join(runDir, "runner.log")
+	reportPath := filepath.Join(runDir, "result.json")
+	stdoutFile, stderrFile, combinedFile, err := openLiveRunLogs(stdoutPath, stderrPath, combinedLogPath)
+	if err != nil {
+		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "open live run logs: %v", err)
+	}
+	defer stdoutFile.Close()
+	defer stderrFile.Close()
+	defer combinedFile.Close()
+
+	combinedStdout := newTaggedLogWriter(combinedFile, "stdout")
+	combinedStderr := newTaggedLogWriter(combinedFile, "stderr")
+	rateLimitWatcher := newRateLimitStreamWatcher(nil)
+	cmdReq.StdoutWriter = composeWriters(opts.StreamOutput, stdoutFile, combinedStdout, rateLimitWatcher)
+	cmdReq.StderrWriter = composeWriters(opts.StreamOutput, stderrFile, combinedStderr)
+
 	runCtx := ctx
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		runCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
+	runCtx, cancelRun := context.WithCancel(runCtx)
+	defer cancelRun()
+	rateLimitWatcher.cancel = cancelRun
 	stopHeartbeat := startProgressHeartbeat(runCtx, opts.ProgressOutput, progressHeartbeatInterval)
 	defer stopHeartbeat()
 
 	cmdResult, runErr := e.runner.Run(runCtx, cmdReq)
 
-	stdoutPath := filepath.Join(runDir, "stdout.log")
-	stderrPath := filepath.Join(runDir, "stderr.log")
-	combinedLogPath := filepath.Join(runDir, "runner.log")
-	reportPath := filepath.Join(runDir, "result.json")
 	if err := os.WriteFile(stdoutPath, cmdResult.Stdout, 0o644); err != nil {
 		return Result{}, wrapToolError(ErrorCodeArtifactWriteFailed, false, "write stdout log: %v", err)
 	}
@@ -164,6 +190,32 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 			result.Summary = timeoutSummary
 			result.NextAction = "retry"
 			result.FailureFingerprint = ErrorCodeRunnerTimeout
+			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+				return Result{}, err
+			}
+			return result, nil
+		}
+
+		if rateLimitWatcher.Matched() {
+			summary, _ := runnerRateLimitSummary(effectiveRunner(opts), cmdResult.Stdout, cmdResult.Stderr)
+			if strings.TrimSpace(summary) == "" {
+				summary = fmt.Sprintf("%s rate limited before producing a structured result", effectiveRunner(opts))
+			}
+			result.Status = "failed"
+			result.Summary = summary
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeRunnerRateLimited
+			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
+				return Result{}, err
+			}
+			return result, nil
+		}
+
+		if summary, ok := runnerRateLimitSummary(effectiveRunner(opts), cmdResult.Stdout, cmdResult.Stderr); ok {
+			result.Status = "failed"
+			result.Summary = summary
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeRunnerRateLimited
 			if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
 				return Result{}, err
 			}
@@ -241,6 +293,20 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 			return result, nil
 		}
 		result = normalizedResult
+	}
+	if opts.AgentType == AgentDeveloper {
+		if err := validateDeveloperResult(result); err != nil {
+			result.Status = "failed"
+			result.Summary = invalidStructuredSummary
+			result.NextAction = "retry"
+			result.FailureFingerprint = ErrorCodeMalformedOutput
+			result.Findings = nil
+			result.ArtifactRefs = ArtifactRefs{}
+			if persistErr := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); persistErr != nil {
+				return Result{}, persistErr
+			}
+			return result, nil
+		}
 	}
 	if err := persistResultReport(&result, opts.WorkDir, combinedLogPath, reportPath); err != nil {
 		return Result{}, err
@@ -454,7 +520,7 @@ func isUsableFeedbackResult(result Result) bool {
 		return false
 	}
 	switch strings.TrimSpace(result.FailureFingerprint) {
-	case ErrorCodeMalformedOutput, ErrorCodeRunnerExecution, ErrorCodeRunnerTimeout:
+	case ErrorCodeMalformedOutput, ErrorCodeRunnerExecution, ErrorCodeRunnerRateLimited, ErrorCodeRunnerTimeout:
 		return false
 	}
 	return !strings.EqualFold(strings.TrimSpace(result.Status), "timeout")
@@ -730,6 +796,123 @@ func runnerFailureSummary(runner RunnerID, stderr []byte) string {
 		return "codex-cli failed before producing a structured result; codex could not write its runtime temp dir under ~/.codex/tmp/arg0"
 	}
 	return defaultSummary
+}
+
+func runnerRateLimitSummary(runner RunnerID, stdout, stderr []byte) (string, bool) {
+	text := strings.TrimSpace(string(stdout))
+	if extra := strings.TrimSpace(string(stderr)); extra != "" {
+		if text != "" {
+			text += "\n" + extra
+		} else {
+			text = extra
+		}
+	}
+	if text == "" {
+		return "", false
+	}
+
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "rate_limit") && !strings.Contains(lower, "you've hit your limit") && !strings.Contains(lower, "you have hit your limit") {
+		return "", false
+	}
+
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if summary, ok := summarizeRateLimitLine(runner, trimmed); ok {
+			return summary, true
+		}
+		normalized := strings.ToLower(trimmed)
+		if strings.Contains(normalized, "you've hit your limit") || strings.Contains(normalized, "you have hit your limit") {
+			return fmt.Sprintf("%s rate limited: %s", runner, trimmed), true
+		}
+	}
+	return fmt.Sprintf("%s rate limited before producing a structured result", runner), true
+}
+
+func summarizeRateLimitLine(runner RunnerID, line string) (string, bool) {
+	var event map[string]any
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return "", false
+	}
+
+	if text := extractRateLimitMessage(event); text != "" {
+		return fmt.Sprintf("%s rate limited: %s", runner, text), true
+	}
+	if eventType, _ := event["type"].(string); eventType == "rate_limit_event" {
+		if info, _ := event["rate_limit_info"].(map[string]any); info != nil {
+			if resetsAt, ok := info["resetsAt"].(float64); ok && resetsAt > 0 {
+				resetTime := time.Unix(int64(resetsAt), 0).UTC().Format(time.RFC3339)
+				return fmt.Sprintf("%s rate limited until %s", runner, resetTime), true
+			}
+		}
+		return fmt.Sprintf("%s rate limited before producing a structured result", runner), true
+	}
+	return "", false
+}
+
+func extractRateLimitMessage(event map[string]any) string {
+	message, _ := event["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	for _, raw := range content {
+		part, _ := raw.(map[string]any)
+		if part == nil {
+			continue
+		}
+		text, _ := part["text"].(string)
+		if text == "" {
+			continue
+		}
+		normalized := strings.ToLower(strings.TrimSpace(text))
+		if strings.Contains(normalized, "you've hit your limit") || strings.Contains(normalized, "you have hit your limit") {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func newRateLimitStreamWatcher(cancel context.CancelFunc) *rateLimitStreamWatcher {
+	return &rateLimitStreamWatcher{cancel: cancel}
+}
+
+func (w *rateLimitStreamWatcher) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+	w.buf.Write(p)
+	if streamContainsRateLimit(w.buf.String()) {
+		w.markMatchedLocked()
+	}
+	return len(p), nil
+}
+
+func (w *rateLimitStreamWatcher) Matched() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.matched
+}
+
+func (w *rateLimitStreamWatcher) markMatchedLocked() {
+	if w.matched {
+		return
+	}
+	w.matched = true
+	if w.cancel != nil {
+		w.cancel()
+	}
+}
+
+func streamContainsRateLimit(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "\"error\":\"rate_limit\"") ||
+		strings.Contains(lower, "\"error\": \"rate_limit\"") ||
+		strings.Contains(lower, "you've hit your limit") ||
+		strings.Contains(lower, "you have hit your limit")
 }
 
 func parseRunnerOutput(lastMessagePath string, stdout []byte) (resultPayload, string, error) {
@@ -1157,6 +1340,117 @@ func persistResultReport(result *Result, workdir, combinedLogPath, reportPath st
 		return wrapToolError(ErrorCodeArtifactWriteFailed, false, "write result report: %v", err)
 	}
 	return nil
+}
+
+func openLiveRunLogs(stdoutPath, stderrPath, combinedLogPath string) (*os.File, *os.File, *os.File, error) {
+	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		stdoutFile.Close()
+		return nil, nil, nil, err
+	}
+	combinedFile, err := os.OpenFile(combinedLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		stdoutFile.Close()
+		stderrFile.Close()
+		return nil, nil, nil, err
+	}
+	return stdoutFile, stderrFile, combinedFile, nil
+}
+
+func composeWriters(writers ...io.Writer) io.Writer {
+	var filtered []io.Writer
+	for _, writer := range writers {
+		if writer != nil {
+			filtered = append(filtered, writer)
+		}
+	}
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
+	default:
+		return io.MultiWriter(filtered...)
+	}
+}
+
+type taggedLogWriter struct {
+	mu      sync.Mutex
+	out     io.Writer
+	tag     string
+	atStart bool
+}
+
+func newTaggedLogWriter(out io.Writer, tag string) io.Writer {
+	return &taggedLogWriter{out: out, tag: tag, atStart: true}
+}
+
+func (w *taggedLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	total := 0
+	for len(p) > 0 {
+		if w.atStart {
+			if _, err := io.WriteString(w.out, "["+w.tag+"] "); err != nil {
+				return total, err
+			}
+			w.atStart = false
+		}
+		idx := bytes.IndexByte(p, '\n')
+		if idx < 0 {
+			n, err := w.out.Write(p)
+			total += n
+			return total, err
+		}
+		n, err := w.out.Write(p[:idx+1])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		w.atStart = true
+		p = p[idx+1:]
+	}
+	return total, nil
+}
+
+func validateDeveloperResult(result Result) error {
+	if referencesUpstreamReviewRun(result.ArtifactRefs.Log) || referencesUpstreamReviewRun(result.ArtifactRefs.Report) {
+		return errors.New("developer result reuses upstream qa/reviewer artifact refs")
+	}
+	for _, finding := range result.Findings {
+		if isUpstreamReviewerID(finding.ReviewerID) {
+			return errors.New("developer result reuses upstream qa/reviewer findings")
+		}
+	}
+	return nil
+}
+
+func referencesUpstreamReviewRun(path string) bool {
+	normalized := strings.TrimSpace(filepath.ToSlash(path))
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.TrimPrefix(normalized, "./")
+	for _, segment := range strings.Split(normalized, "/") {
+		switch strings.ToLower(strings.TrimSpace(segment)) {
+		case "qa", "reviewer":
+			return true
+		}
+	}
+	return false
+}
+
+func isUpstreamReviewerID(value string) bool {
+	id := strings.ToLower(strings.TrimSpace(value))
+	if id == "" {
+		return false
+	}
+	return id == "qa-agent" || strings.HasPrefix(id, "reviewer-")
 }
 
 func relOrAbs(workdir, path string) string {

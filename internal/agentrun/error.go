@@ -12,6 +12,7 @@ const (
 	ErrorCodeTaskNotFound        = "task_not_found"
 	ErrorCodeInternalFailure     = "internal_failure"
 	ErrorCodeRunnerExecution     = "runner_execution_failed"
+	ErrorCodeRunnerRateLimited   = "runner_rate_limited"
 	ErrorCodeRunnerTimeout       = "runner_timeout"
 	ErrorCodeMalformedOutput     = "malformed_output"
 	ErrorCodeSchemaBuildFailed   = "schema_build_failed"

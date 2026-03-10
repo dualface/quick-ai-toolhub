@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,6 +140,59 @@ agents:
 	result, err := executor.RunTask(context.Background(), RunOptions{
 		TaskID:    "Sprint-04/Task-01",
 		AgentType: AgentDeveloper,
+		Runner:    RunnerClaudeCLI,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	if result.Runner != RunnerClaudeCLI {
+		t.Fatalf("unexpected runner: %s", result.Runner)
+	}
+}
+
+func TestRunTaskUsesDefaultRunnerWhenAgentRunnerMissing(t *testing.T) {
+	repo := setupTestRepo(t)
+	mustWriteFile(t, filepath.Join(repo, "config/config.yaml"), strings.TrimSpace(`
+repo:
+  github_owner: example-owner
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
+default_runner: claude-cli
+default_model: claude-sonnet-4-5
+
+agents:
+  developer:
+    template_file: prompts/agents/developer.md
+  qa:
+    template_file: prompts/agents/qa.md
+  reviewer:
+    runner: codex-cli
+    template_file: prompts/agents/reviewer.md
+`)+"\n")
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			args := strings.Join(req.Args, " ")
+			if !strings.Contains(args, "claude -p ") {
+				t.Fatalf("unexpected args: %s", args)
+			}
+			return CommandResult{Stdout: []byte(`{"status":"success","summary":"implemented","next_action":"proceed","failure_fingerprint":null,"artifact_refs":null,"findings":[]}`)}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		Runner:    RunnerClaudeCLI,
 		TasksDir:  filepath.Join(repo, "plan/tasks"),
 		WorkDir:   repo,
 	})
@@ -270,6 +324,9 @@ func TestRunTaskDeveloperUsesLatestUsableFeedbackArtifactsAsContext(t *testing.T
 				"If execution context includes latest_qa_feedback, read it first, then use latest_qa_artifact_refs for full detail before making changes.",
 				"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
 				"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+				"Treat latest_qa_feedback, latest_reviewer_feedback, and their artifact_refs as input context only; do not copy them verbatim into your final result.",
+				"Return completed_with_findings or needs_fix only if you attempted the relevant fixes in this run and unresolved issues still remain after your own verification.",
+				"In the final result, artifact_refs must describe this developer run's outputs; do not point artifact_refs.log or artifact_refs.report at QA or reviewer runs.",
 				"After fixing the explicit findings, inspect adjacent branches in the same control flow, persistence path, and recovery path for similar defects.",
 			} {
 				if !strings.Contains(prompt, expected) {
@@ -557,6 +614,96 @@ func TestRunTaskRunnerFailureWithMalformedPayloadReturnsMalformedOutput(t *testi
 	}
 }
 
+func TestRunTaskRunnerRateLimitReturnsRateLimitedFailure(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			return CommandResult{
+				Stdout: []byte("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"You've hit your limit · resets 5am (Asia/Shanghai)\"}]},\"error\":\"rate_limit\"}\n"),
+			}, errors.New("exit status 1")
+		},
+	}
+
+	executor := NewExecutor(runner)
+	executor.now = func() time.Time {
+		return time.Date(2026, 3, 11, 2, 0, 0, 0, time.UTC)
+	}
+	executor.runID = func() string { return "runid123" }
+
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		Runner:    RunnerClaudeCLI,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+	if result.NextAction != "retry" {
+		t.Fatalf("unexpected next action: %s", result.NextAction)
+	}
+	if result.FailureFingerprint != ErrorCodeRunnerRateLimited {
+		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
+	}
+	if result.Summary != "claude-cli rate limited: You've hit your limit · resets 5am (Asia/Shanghai)" {
+		t.Fatalf("unexpected summary: %s", result.Summary)
+	}
+	if result.ArtifactRefs.Report == "" || result.ArtifactRefs.Log == "" {
+		t.Fatalf("missing artifact refs: %+v", result.ArtifactRefs)
+	}
+}
+
+func TestRunTaskStreamRateLimitCancelsRunnerAndPersistsResult(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(ctx context.Context, req CommandRequest) (CommandResult, error) {
+			if _, err := io.WriteString(req.StdoutWriter, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"You've hit your limit · resets 5am (Asia/Shanghai)\"}]},\"error\":\"rate_limit\"}\n"); err != nil {
+				t.Fatalf("write stdout: %v", err)
+			}
+			<-ctx.Done()
+			return CommandResult{
+				Stdout: []byte("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"You've hit your limit · resets 5am (Asia/Shanghai)\"}]},\"error\":\"rate_limit\"}\n"),
+			}, ctx.Err()
+		},
+	}
+
+	executor := NewExecutor(runner)
+	executor.now = func() time.Time {
+		return time.Date(2026, 3, 11, 2, 5, 0, 0, time.UTC)
+	}
+	executor.runID = func() string { return "runid123" }
+
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		Runner:    RunnerClaudeCLI,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" || result.FailureFingerprint != ErrorCodeRunnerRateLimited {
+		t.Fatalf("expected rate-limited failure, got %+v", result)
+	}
+	if result.Summary != "claude-cli rate limited: You've hit your limit · resets 5am (Asia/Shanghai)" {
+		t.Fatalf("unexpected summary: %s", result.Summary)
+	}
+	if result.ArtifactRefs.Report == "" {
+		t.Fatalf("missing report ref: %+v", result.ArtifactRefs)
+	}
+	reportPath := filepath.Join(repo, filepath.FromSlash(result.ArtifactRefs.Report))
+	if _, err := os.Stat(reportPath); err != nil {
+		t.Fatalf("expected persisted result report: %v", err)
+	}
+}
+
 func TestRunTaskRejectsUnknownStatusPayload(t *testing.T) {
 	repo := setupTestRepo(t)
 	runner := &fakeCommandRunner{
@@ -673,6 +820,101 @@ func TestRunTaskPreservesAgentReportArtifact(t *testing.T) {
 	}
 }
 
+func TestRunTaskCreatesAndStreamsLiveLogsBeforeCommandCompletes(t *testing.T) {
+	repo := setupTestRepo(t)
+
+	executor := NewExecutor(&fakeCommandRunner{})
+	executor.now = func() time.Time {
+		return time.Date(2026, 3, 11, 1, 2, 3, 0, time.UTC)
+	}
+	executor.runID = func() string { return "runid123" }
+
+	runDir := filepath.Join(
+		repo,
+		".toolhub",
+		"runs",
+		filepath.FromSlash("Sprint-04/Task-01"),
+		string(AgentDeveloper),
+		"attempt-01",
+		"default",
+		"20260311T010203.000000000Z-runid123",
+	)
+	stdoutPath := filepath.Join(runDir, "stdout.log")
+	stderrPath := filepath.Join(runDir, "stderr.log")
+	combinedPath := filepath.Join(runDir, "runner.log")
+
+	executor.runner = &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			for _, path := range []string{stdoutPath, stderrPath, combinedPath} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatalf("expected live log file %s: %v", path, err)
+				}
+				if info.Size() != 0 {
+					t.Fatalf("expected empty live log file before streaming, got %d bytes for %s", info.Size(), path)
+				}
+			}
+
+			if _, err := io.WriteString(req.StdoutWriter, "partial stdout\n"); err != nil {
+				t.Fatalf("write stdout: %v", err)
+			}
+			if _, err := io.WriteString(req.StderrWriter, "partial stderr\n"); err != nil {
+				t.Fatalf("write stderr: %v", err)
+			}
+
+			stdoutBytes, err := os.ReadFile(stdoutPath)
+			if err != nil {
+				t.Fatalf("read live stdout: %v", err)
+			}
+			if !strings.Contains(string(stdoutBytes), "partial stdout") {
+				t.Fatalf("expected live stdout content, got %q", string(stdoutBytes))
+			}
+
+			stderrBytes, err := os.ReadFile(stderrPath)
+			if err != nil {
+				t.Fatalf("read live stderr: %v", err)
+			}
+			if !strings.Contains(string(stderrBytes), "partial stderr") {
+				t.Fatalf("expected live stderr content, got %q", string(stderrBytes))
+			}
+
+			combinedBytes, err := os.ReadFile(combinedPath)
+			if err != nil {
+				t.Fatalf("read live combined log: %v", err)
+			}
+			for _, needle := range []string{"[stdout] partial stdout", "[stderr] partial stderr"} {
+				if !strings.Contains(string(combinedBytes), needle) {
+					t.Fatalf("expected live combined log to contain %q, got %q", needle, string(combinedBytes))
+				}
+			}
+
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"success","summary":"implemented","next_action":"proceed","failure_fingerprint":null,"artifact_refs":null,"findings":null}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{
+				Stdout: []byte(`{"session_id":"123e4567-e89b-12d3-a456-426614174000"}` + "\n"),
+				Stderr: []byte("partial stderr\n"),
+			}, nil
+		},
+	}
+
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "success" {
+		t.Fatalf("unexpected status: %s", result.Status)
+	}
+}
+
 func TestRunTaskRejectsPartialArtifactRefsPayload(t *testing.T) {
 	repo := setupTestRepo(t)
 	runner := &fakeCommandRunner{
@@ -708,6 +950,70 @@ func TestRunTaskRejectsPartialArtifactRefsPayload(t *testing.T) {
 	}
 	if result.FailureFingerprint != ErrorCodeMalformedOutput {
 		t.Fatalf("unexpected failure fingerprint: %s", result.FailureFingerprint)
+	}
+}
+
+func TestRunTaskDeveloperRejectsUpstreamArtifactRefsInFinalResult(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"completed_with_findings","summary":"still broken","next_action":"needs_fix","failure_fingerprint":null,"artifact_refs":{"log":".toolhub/runs/Sprint-04/Task-01/qa/attempt-02/default/run/runner.log","worktree":".","patch":null,"report":".toolhub/runs/Sprint-04/Task-01/qa/attempt-02/default/run/result.json"},"findings":[]}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" || result.FailureFingerprint != ErrorCodeMalformedOutput {
+		t.Fatalf("expected malformed developer result, got %+v", result)
+	}
+	if result.ArtifactRefs.Report == "" || strings.Contains(result.ArtifactRefs.Report, "/qa/") {
+		t.Fatalf("expected persisted local report path, got %+v", result.ArtifactRefs)
+	}
+}
+
+func TestRunTaskDeveloperRejectsUpstreamReviewerIDsInFindings(t *testing.T) {
+	repo := setupTestRepo(t)
+	runner := &fakeCommandRunner{
+		run: func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			lastMessagePath := findFlagValue(req.Args, "-o")
+			payload := `{"status":"completed_with_findings","summary":"still broken","next_action":"needs_fix","failure_fingerprint":null,"artifact_refs":null,"findings":[{"reviewer_id":"qa-agent","lens":"correctness","severity":"high","confidence":"high","category":"state_machine","file_refs":["internal/orchestrator/run.go"],"summary":"copied qa finding","evidence":"came from qa","finding_fingerprint":"copied:qa","suggested_action":"fix it"}]}`
+			if err := os.WriteFile(lastMessagePath, []byte(payload), 0o644); err != nil {
+				t.Fatalf("write last message: %v", err)
+			}
+			return CommandResult{}, nil
+		},
+	}
+
+	executor := NewExecutor(runner)
+	result, err := executor.RunTask(context.Background(), RunOptions{
+		TaskID:    "Sprint-04/Task-01",
+		AgentType: AgentDeveloper,
+		TasksDir:  filepath.Join(repo, "plan/tasks"),
+		WorkDir:   repo,
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+
+	if result.Status != "failed" || result.FailureFingerprint != ErrorCodeMalformedOutput {
+		t.Fatalf("expected malformed developer result, got %+v", result)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("expected malformed developer result to clear findings, got %+v", result.Findings)
 	}
 }
 
@@ -1382,6 +1688,9 @@ agents:
 - Fix the concrete problems called out by that latest QA round before doing any follow-on work.
 - After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.
 - If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.
+- Treat latest_qa_feedback, latest_reviewer_feedback, and their artifact_refs as input context only; do not copy them verbatim into your final result.
+- Return completed_with_findings or needs_fix only if you attempted the relevant fixes in this run and unresolved issues still remain after your own verification.
+- In the final result, artifact_refs must describe this developer run's outputs; do not point artifact_refs.log or artifact_refs.report at QA or reviewer runs.
 - Before finishing, verify that each acceptance criterion and each relevant contract rule is covered by code changes plus a validation step or test.
 - After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.
 - For tool-contract tasks, audit adjacent required fields, enum values, uniqueness constraints, empty-input combinations, and contradictory status/result combinations touched by the change.
@@ -1688,6 +1997,9 @@ func TestBuildPromptDeveloperIncludesFeedbackRepairRules(t *testing.T) {
 		"Fix the concrete problems called out by that latest QA round before doing any follow-on work.",
 		"After the latest QA issues are addressed, read latest_reviewer_feedback, then use latest_reviewer_artifact_refs to fix the latest reviewer findings.",
 		"If previous_developer_context is present, continue from that summary and changed file list instead of re-discovering the same work.",
+		"Treat latest_qa_feedback, latest_reviewer_feedback, and their artifact_refs as input context only; do not copy them verbatim into your final result.",
+		"Return completed_with_findings or needs_fix only if you attempted the relevant fixes in this run and unresolved issues still remain after your own verification.",
+		"In the final result, artifact_refs must describe this developer run's outputs; do not point artifact_refs.log or artifact_refs.report at QA or reviewer runs.",
 		"After fixing a validation or contract finding, inspect sibling invalid-input and edge cases for the same interface instead of stopping at the exact failing example.",
 		"When multiple signals can coexist, explicitly separate metadata from the final decision and check which combinations should preserve both.",
 		"Before handing off, remove dead code, stale helpers, and replaced branches that this task made obsolete, especially if they can trip lint or confuse the active code path.",
