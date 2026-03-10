@@ -9,7 +9,8 @@ database:
 server:
   listen_addr: 127.0.0.1:8080
 
-default_model: sonnet
+default_runner: codex-cli
+default_model: gpt-5.4
 
 agents:
   developer:
@@ -17,8 +18,7 @@ agents:
     model: opus
     template_file: prompts/agents/developer.md
   qa:
-    runner: claude-cli
     template_file: prompts/agents/qa.md
   reviewer:
-    runner: claude-cli
     template_file: prompts/agents/reviewer.md
+

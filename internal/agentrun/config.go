@@ -12,8 +12,9 @@ import (
 )
 
 type agentSettings struct {
-	DefaultModel string
-	Profiles     map[AgentType]agentProfile
+	DefaultRunner RunnerID
+	DefaultModel  string
+	Profiles      map[AgentType]agentProfile
 }
 
 type agentProfile struct {
@@ -50,7 +51,8 @@ func loadAgentSettings(workdir, configFile string) (agentSettings, error) {
 	}
 
 	settings := agentSettings{
-		DefaultModel: cfg.DefaultModel,
+		DefaultRunner: normalizeRunnerID(cfg.DefaultRunner),
+		DefaultModel:  cfg.DefaultModel,
 		Profiles: map[AgentType]agentProfile{
 			AgentDeveloper: {
 				Runner:       normalizeRunnerID(cfg.Agents.Developer.Runner),
@@ -89,12 +91,14 @@ func loadAgentSettings(workdir, configFile string) (agentSettings, error) {
 
 func normalizeRunnerID(value string) RunnerID {
 	switch strings.TrimSpace(value) {
-	case "", string(RunnerCodexExec):
+	case "":
+		return ""
+	case string(RunnerCodexExec):
 		return RunnerCodexExec
 	case string(RunnerClaudeCLI):
 		return RunnerClaudeCLI
 	default:
-		return RunnerCodexExec
+		return ""
 	}
 }
 
@@ -108,6 +112,9 @@ func (s agentSettings) defaultModelFor(agentType AgentType) string {
 func (s agentSettings) runnerFor(agentType AgentType) RunnerID {
 	if profile, ok := s.Profiles[agentType]; ok && profile.Runner != "" {
 		return profile.Runner
+	}
+	if s.DefaultRunner != "" {
+		return s.DefaultRunner
 	}
 	return RunnerCodexExec
 }

@@ -29,8 +29,50 @@ func TestLoadUsesDefaultConfigPath(t *testing.T) {
 	if got := cfg.DefaultModelFor("reviewer"); got != "gpt-5.3-codex-spark" {
 		t.Fatalf("unexpected reviewer default model: %s", got)
 	}
+	if got := cfg.DefaultRunnerFor("developer"); got != "codex-cli" {
+		t.Fatalf("unexpected developer default runner: %s", got)
+	}
 	if got, _ := cfg.AgentProfile("developer"); got.Runner != "" {
 		t.Fatalf("expected empty runner override by default, got %q", got.Runner)
+	}
+}
+
+func TestLoadUsesDefaultRunnerWhenAgentOverrideMissing(t *testing.T) {
+	root := t.TempDir()
+	writeConfigFile(t, root, DefaultFile, strings.TrimSpace(`
+repo:
+  github_owner: acme
+  github_repo: quick-ai-toolhub
+  default_branch: main
+
+database:
+  path: .toolhub/toolhub.db
+
+server:
+  listen_addr: 127.0.0.1:8080
+
+default_runner: claude-cli
+default_model: gpt-5.4
+
+agents:
+  developer:
+    template_file: prompts/agents/developer.md
+  qa:
+    template_file: prompts/agents/qa.md
+  reviewer:
+    runner: codex-cli
+    template_file: prompts/agents/reviewer.md
+`)+"\n")
+
+	cfg, err := Load(root, "")
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if got := cfg.DefaultRunnerFor("developer"); got != "claude-cli" {
+		t.Fatalf("unexpected developer default runner: %q", got)
+	}
+	if got := cfg.DefaultRunnerFor("reviewer"); got != "codex-cli" {
+		t.Fatalf("unexpected reviewer runner override: %q", got)
 	}
 }
 
@@ -150,6 +192,7 @@ server:
   listen_addr: 127.0.0.1:8080
 
 default_model: gpt-5.3-codex-spark
+default_runner: codex-cli
 
 agents:
   developer:

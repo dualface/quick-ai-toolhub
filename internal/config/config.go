@@ -16,12 +16,13 @@ const (
 )
 
 type Config struct {
-	Path         string         `yaml:"-"`
-	Repo         RepoConfig     `yaml:"repo"`
-	Database     DatabaseConfig `yaml:"database"`
-	Server       ServerConfig   `yaml:"server"`
-	DefaultModel string         `yaml:"default_model"`
-	Agents       AgentsConfig   `yaml:"agents"`
+	Path          string         `yaml:"-"`
+	Repo          RepoConfig     `yaml:"repo"`
+	Database      DatabaseConfig `yaml:"database"`
+	Server        ServerConfig   `yaml:"server"`
+	DefaultRunner string         `yaml:"default_runner"`
+	DefaultModel  string         `yaml:"default_model"`
+	Agents        AgentsConfig   `yaml:"agents"`
 }
 
 type RepoConfig struct {
@@ -116,6 +117,14 @@ func (c Config) DefaultModelFor(agentType string) string {
 	return c.DefaultModel
 }
 
+func (c Config) DefaultRunnerFor(agentType string) string {
+	profile, ok := c.AgentProfile(agentType)
+	if ok && profile.Runner != "" {
+		return profile.Runner
+	}
+	return c.DefaultRunner
+}
+
 func (c Config) AgentProfile(agentType string) (AgentProfile, bool) {
 	switch strings.TrimSpace(agentType) {
 	case "developer":
@@ -135,6 +144,7 @@ func (c *Config) normalize() {
 	c.Repo.DefaultBranch = strings.TrimSpace(c.Repo.DefaultBranch)
 	c.Database.Path = strings.TrimSpace(c.Database.Path)
 	c.Server.ListenAddr = strings.TrimSpace(c.Server.ListenAddr)
+	c.DefaultRunner = strings.TrimSpace(c.DefaultRunner)
 	c.DefaultModel = strings.TrimSpace(c.DefaultModel)
 	c.Agents.Developer.normalize()
 	c.Agents.QA.normalize()
