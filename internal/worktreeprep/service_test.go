@@ -58,6 +58,7 @@ func TestExecuteCreatesBranchesAndWorktree(t *testing.T) {
 	client := newTestGitClient(env)
 	assertLocalBranchExists(t, ctx, client, cloneDir, req.SprintBranch)
 	assertLocalBranchExists(t, ctx, client, cloneDir, req.TaskBranch)
+	assertRemoteBranchExists(t, ctx, client, cloneDir, req.SprintBranch)
 
 	currentBranch, err := client.RevParse(ctx, toolgit.RevParseRequest{
 		WorkDir:   response.Data.WorktreePath,
@@ -325,6 +326,23 @@ func assertLocalBranchExists(t *testing.T, ctx context.Context, client *toolgit.
 	}
 	if !exists {
 		t.Fatalf("expected local branch %s to exist", branch)
+	}
+}
+
+func assertRemoteBranchExists(t *testing.T, ctx context.Context, client *toolgit.Client, workdir, branch string) {
+	t.Helper()
+
+	exists, err := client.BranchExists(ctx, toolgit.BranchExistsRequest{
+		WorkDir:  workdir,
+		Branch:   branch,
+		Location: toolgit.BranchLocationRemoteTracking,
+		Remote:   "origin",
+	})
+	if err != nil {
+		t.Fatalf("remote branch exists %s: %v", branch, err)
+	}
+	if !exists {
+		t.Fatalf("expected remote branch %s to exist", branch)
 	}
 }
 

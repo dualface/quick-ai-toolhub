@@ -77,7 +77,6 @@
 - `Global Leader` 可以选出下一个可执行 task
 - `Sprint Branch` 和 `task branch` 可以按规范创建
 - 对应 worktree 可以创建、复用和恢复
-- task 启动前后的关键状态变化会落事件和状态投影
 
 ### Tasks
 
@@ -86,7 +85,6 @@
 | `Task-01` | 实现 Leader 调度选择逻辑   | 实现 `select-next-sprint`、`select-next-task` 和基础状态校验 |
 | `Task-02` | 实现 git adapter           | 封装本地分支、提交、fetch、push、worktree 等 git 操作        |
 | `Task-03` | 实现 prepare-worktree-tool | 创建或复用 `Sprint Branch`、`task branch` 和独立 worktree    |
-| `Task-04` | 打通 Task 启动状态流       | 在 task 启动时写事件、更新投影并保存 worktree / branch 引用  |
 
 ## [Sprint-04] Task 执行闭环
 
@@ -98,7 +96,7 @@
 
 - `Task Orchestrator` 可以按阶段调用 `Developer`、`QA`、`Reviewer`
 - 每个阶段结果都能以统一 schema 落到本地
-- reviewer findings 可以聚合、去重并形成统一结论
+- 单 reviewer 结果可以被校验、归一并形成统一结论
 - 重试次数、失败指纹、无进展判断开始生效
 
 ### Tasks
@@ -107,8 +105,8 @@
 | --------- | ----------------------------- | ------------------------------------------------ |
 | `Task-01` | 实现 run-agent-tool           | 建立 Agent 调用接口、超时控制和结果收集          |
 | `Task-02` | 实现 Task Orchestrator 阶段机 | 打通 `developer`、`qa`、`review` 阶段推进和回退  |
-| `Task-03` | 实现 review-aggregation-tool  | 实现 findings 聚合内核、去重、置信度提升和冲突识别 |
-| `Task-04` | 接入 review 聚合与补充审查流  | 将 review-aggregation-tool 接入 orchestrator 并完成补充审查分支 |
+| `Task-03` | 实现 review-result-tool       | 校验单 reviewer 结果、归一字段并输出稳定结论       |
+| `Task-04` | 接入 reviewer 结果收口与人工接管流 | 将 review-result-tool 接入 orchestrator 并完成 review 阶段决策 |
 | `Task-05` | 实现失败指纹与重试计数        | 生成 failure fingerprint 并维护各阶段失败计数 |
 | `Task-06` | 实现无进展检测与升级建议      | 检测重复失败和长时间无进展并输出升级信号 |
 
@@ -145,7 +143,7 @@
 
 ### Done When
 
-- `Sprint PR` 创建前可以在 `Sprint Branch` 上并发执行 reviewer 审查并聚合结果
+- `Sprint PR` 创建前可以在 `Sprint Branch` 上执行单 reviewer 审查并收口结果
 - `Sprint` 下所有 task 完成后可以创建 `Sprint PR`
 - 每个 `Sprint` 都有连续可读的时间线日志
 - 进程重启后可以恢复当前 `Sprint` / `Task` 状态
@@ -155,8 +153,8 @@
 
 | task_id   | 标题                           | 交付                                                                               |
 | --------- | ------------------------------ | ---------------------------------------------------------------------------------- |
-| `Task-01` | 实现 Sprint reviewer 并发调度   | 在 `Sprint Branch` 上并发启动异质化 reviewer                                      |
-| `Task-02` | 实现 Sprint 级 review 聚合      | 聚合 Sprint reviewer findings 并形成 `Sprint PR` 前置结论                         |
+| `Task-01` | 实现 Sprint reviewer 调度       | 在 `Sprint Branch` 上启动单个 reviewer 并收集结果                                 |
+| `Task-02` | 实现 Sprint review 结果收口     | 校验单个 Sprint reviewer 结果并形成 `Sprint PR` 前置结论                          |
 | `Task-03` | 实现 sprint-pr-tool             | 创建并跟踪 `Sprint PR`，等待人工审查与合并                                         |
 | `Task-04` | 实现 timeline-log-tool          | 追加写 `logs/<sprint>.log` 并记录关键时间线事件                                    |
 | `Task-05` | 实现 Leader 启动恢复            | 启动时恢复当前 `Sprint` / `Task` 控制状态                                          |
@@ -166,6 +164,36 @@
 
 ## 实施顺序说明
 
-- 先完成 `Sprint-01` 到 `Sprint-03`，得到“能选 task、能建 worktree”的最小控制面
-- 再完成 `Sprint-04` 到 `Sprint-05`，得到“能跑 task、能提 PR、能看 CI”的最小交付闭环
+- 先完成 `Sprint-01` 到 `Sprint-03`，得到”能选 task、能建 worktree”的最小控制面
+- 再完成 `Sprint-04` 到 `Sprint-05`，得到”能跑 task、能提 PR、能看 CI”的最小交付闭环
 - 最后完成 `Sprint-06`，补齐 `Sprint PR`、恢复和人工接管
+
+## Sprint 终态说明
+
+每个 Sprint 有两类终态：
+
+| 终态        | 含义                                                         | 条件                                                                 |
+| ----------- | ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| `done`      | 所有 Task 均为 `done`，Sprint PR 已被人工合并               | 全部 Task 完成 + Sprint reviewer 通过 + Sprint PR 合并               |
+| `blocked`   | 至少一个 Task 进入 `blocked` 或 `escalated`，或 Sprint reviewer 发现阻塞问题 | 任一 Task 终态为 `blocked`/`escalated`，或 sprint_reviewing -> blocked |
+
+处于终态的 Sprint 不得再自动推进；继续执行需要人工显式创建新 Sprint 或修复后重开流程。
+
+## 关键跨 Sprint 依赖
+
+以下任务存在跨 Sprint 依赖（仅列 Sprint 编号不同的依赖对），实现时需注意接口兼容：
+
+| 依赖方                    | 依赖目标                 | 依赖内容                                         |
+| ------------------------- | ------------------------ | ------------------------------------------------ |
+| `Sprint-04/Task-01`       | `Sprint-03/Task-03`      | `prepare-worktree-tool`（worktree / branch 输出可用） |
+| `Sprint-04/Task-02`       | `Sprint-03/Task-03`      | `prepare-worktree-tool`（worktree / branch 输出可用） |
+| `Sprint-05/Task-02`       | `Sprint-04/Task-02`      | Task Orchestrator review 阶段完成信号            |
+| `Sprint-05/Task-04`       | `Sprint-02/Task-01`      | GitHub CLI adapter（gh run 读取能力）            |
+| `Sprint-06/Task-01`       | `Sprint-04/Task-01`      | `run-agent-tool`（复用 reviewer 调用能力）       |
+| `Sprint-06/Task-01`       | `Sprint-04/Task-03`      | `review-result-tool` contract                   |
+| `Sprint-06/Task-01`       | `Sprint-05/Task-03`      | Sprint Branch 上的 worktree / 自动合并接线       |
+| `Sprint-06/Task-02`       | `Sprint-04/Task-03`      | `review-result-tool` contract（Sprint 级复用）  |
+| `Sprint-06/Task-05`       | `Sprint-02/Task-03`      | Webhook 增量同步（对账基础能力）                 |
+| `Sprint-06/Task-05`       | `Sprint-03/Task-03`      | `prepare-worktree-tool`（worktree 复用能力）     |
+| `Sprint-06/Task-06`       | `Sprint-03/Task-03`      | `prepare-worktree-tool`（worktree / 对账基础）   |
+| `Sprint-06/Task-07`       | `Sprint-05/Task-06`      | issue 评论写入能力（handoff 评论落点）           |

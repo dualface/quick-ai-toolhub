@@ -18,6 +18,7 @@ type GitClient interface {
 	Fetch(context.Context, toolgit.FetchRequest) error
 	BranchExists(context.Context, toolgit.BranchExistsRequest) (bool, error)
 	CreateBranch(context.Context, toolgit.CreateBranchRequest) error
+	Push(context.Context, toolgit.PushRequest) error
 	AddWorktree(context.Context, toolgit.AddWorktreeRequest) error
 	ListWorktrees(context.Context, toolgit.ListWorktreesRequest) ([]toolgit.Worktree, error)
 	RemoveWorktree(context.Context, toolgit.RemoveWorktreeRequest) error
@@ -221,6 +222,9 @@ func (s *Service) ensureSprintBranch(ctx context.Context, repoRoot, sprintBranch
 		if err != nil {
 			return "", fmt.Errorf("resolve sprint branch %s: %w", sprintBranch, err)
 		}
+		if err := s.pushSprintBranch(ctx, repoRoot, sprintBranch, remote); err != nil {
+			return "", err
+		}
 		return headSHA, nil
 	}
 
@@ -244,7 +248,22 @@ func (s *Service) ensureSprintBranch(ctx context.Context, repoRoot, sprintBranch
 	if err != nil {
 		return "", fmt.Errorf("resolve sprint branch %s: %w", sprintBranch, err)
 	}
+	if err := s.pushSprintBranch(ctx, repoRoot, sprintBranch, remote); err != nil {
+		return "", err
+	}
 	return headSHA, nil
+}
+
+func (s *Service) pushSprintBranch(ctx context.Context, repoRoot, sprintBranch, remote string) error {
+	if err := s.git.Push(ctx, toolgit.PushRequest{
+		WorkDir:     repoRoot,
+		Remote:      remote,
+		Refspecs:    []string{sprintBranch},
+		SetUpstream: true,
+	}); err != nil {
+		return fmt.Errorf("push sprint branch %s to %s: %w", sprintBranch, remote, err)
+	}
+	return nil
 }
 
 func (s *Service) canFastForwardBranch(ctx context.Context, repoRoot, branch, targetRef, currentSHA string) (bool, error) {
