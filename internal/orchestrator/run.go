@@ -139,6 +139,9 @@ func loadLatestStageArtifactRefs(ctx context.Context, db bun.IDB, taskID string)
 			eventDeveloperBlocked,
 			eventQAPassed,
 			eventQAFailed,
+			eventReviewPassed,
+			eventReviewChangesReq,
+			eventReviewAwaitsHuman,
 			eventReviewAggregated,
 			eventTaskBlocked,
 			eventTaskEscalated,
@@ -333,7 +336,7 @@ func stageForEventType(eventType string) (Stage, bool) {
 		return StageDeveloper, true
 	case eventQAPassed, eventQAFailed:
 		return StageQA, true
-	case eventReviewAggregated:
+	case eventReviewPassed, eventReviewChangesReq, eventReviewAwaitsHuman, eventReviewAggregated:
 		return StageReview, true
 	default:
 		return "", false
@@ -515,6 +518,9 @@ func (s *Service) runReviewStage(
 	result.Stage = StageReview
 	result.AgentType = agentrun.AgentReviewer
 	result.Attempt = snapshot.AttemptTotal
+	result.Summary = aggResp.Data.Summary
+	result.Status = reviewOutcomeStatus(aggResp.Data.Decision)
+	result.NextAction = reviewOutcomeNextAction(aggResp.Data.Decision)
 
 	// Attach review-result-tool decision metadata to the stage result for downstream consumption.
 	result.reviewToolDecision = &reviewToolDecisionMeta{
@@ -542,18 +548,19 @@ func reviewerIDFromResult(result StageResult, lens string, attempt int) string {
 // invalid_request errors. The result flows through handleReviewResult as request_changes,
 // mapping to review_failed which returns to Developer on the next loop iteration.
 func invalidRequestReviewResult(attempt int, refs agentrun.ArtifactRefs, err error) *StageResult {
+	summary := fmt.Sprintf("review-result-tool invalid_request: %s", err)
 	return &StageResult{
 		Stage:              StageReview,
 		AgentType:          agentrun.AgentReviewer,
 		Attempt:            attempt,
-		Status:             "failed",
-		Summary:            fmt.Sprintf("review-result-tool invalid_request: %s", err),
-		NextAction:         "return_to_developer",
+		Status:             eventReviewChangesReq,
+		Summary:            summary,
+		NextAction:         reviewOutcomeNextAction(reviewagg.DecisionRequestChanges),
 		FailureFingerprint: "review-result-tool:invalid_request",
 		ArtifactRefs:       refs,
 		reviewToolDecision: &reviewToolDecisionMeta{
 			Decision: reviewagg.DecisionRequestChanges,
-			Summary:  fmt.Sprintf("review-result-tool invalid_request: %s", err),
+			Summary:  summary,
 		},
 	}
 }
@@ -655,6 +662,8 @@ func (s *Service) handleReviewResult(ctx context.Context, snapshot taskRuntimeSn
 	// The orchestrator ONLY consumes review-result-tool's structured decision.
 	// It does NOT directly parse the reviewer's raw status or next_action.
 	decision := decisionFromReviewToolResult(result)
+	result.Status = reviewOutcomeStatus(reviewagg.Decision(decision))
+	result.NextAction = reviewOutcomeNextAction(reviewagg.Decision(decision))
 	targetStatus := "review_failed"
 	update := store.UpdateTaskStatePayload{
 		TaskID:          snapshot.TaskID,
@@ -693,13 +702,6 @@ func (s *Service) handleReviewResult(ctx context.Context, snapshot taskRuntimeSn
 	eventID, updatedSnapshot, err := s.recordReviewOutcome(ctx, snapshot, "review_in_progress", targetStatus, decision, result, rawFindings, update)
 	if err != nil {
 		return StageResult{}, taskRuntimeSnapshot{}, err
-	}
-
-	if decision == reviewDecisionAwaitHuman {
-		updatedSnapshot, err = s.recordTaskAwaitingHuman(ctx, updatedSnapshot, result.Summary, result.FailureFingerprint)
-		if err != nil {
-			return StageResult{}, taskRuntimeSnapshot{}, err
-		}
 	}
 
 	result.EventID = eventID
@@ -862,6 +864,7 @@ func (s *Service) recordReviewOutcome(
 	update store.UpdateTaskStatePayload,
 ) (string, taskRuntimeSnapshot, error) {
 	var eventID string
+	eventType := reviewOutcomeEventType(decision)
 	persistedFindings := copyFindings(rawFindings)
 	if len(persistedFindings) == 0 {
 		persistedFindings = copyFindings(result.Findings)
@@ -876,15 +879,15 @@ func (s *Service) recordReviewOutcome(
 		}
 
 		payload := store.AppendEventPayload{
-			EventID:        taskEventID(current.TaskID, eventReviewAggregated, current.AttemptTotal),
+			EventID:        taskEventID(current.TaskID, eventType, current.AttemptTotal),
 			EntityType:     "task",
 			EntityID:       current.TaskID,
 			SprintID:       stringPointer(current.SprintID),
 			TaskID:         stringPointer(current.TaskID),
-			EventType:      eventReviewAggregated,
+			EventType:      eventType,
 			Source:         orchestratorSource,
 			Attempt:        intPointer(current.AttemptTotal),
-			IdempotencyKey: taskEventIDKey(current.TaskID, eventReviewAggregated, current.AttemptTotal),
+			IdempotencyKey: taskEventIDKey(current.TaskID, eventType, current.AttemptTotal),
 			PayloadJSON: map[string]any{
 				"task_status_from": strings.TrimSpace(current.Status),
 				"task_status_to":   targetStatus,
@@ -902,6 +905,29 @@ func (s *Service) recordReviewOutcome(
 
 		if err := persistReviewFindings(ctx, tx.DB(), current.TaskID, eventID, persistedFindings); err != nil {
 			return err
+		}
+		if decision == reviewDecisionAwaitHuman {
+			awaitingHumanSummary := awaitingHumanReason(result)
+			if _, err := tx.AppendEvent(ctx, store.AppendEventPayload{
+				EventID:        taskEventID(current.TaskID, eventTaskAwaitingHuman, current.AttemptTotal),
+				EntityType:     "task",
+				EntityID:       current.TaskID,
+				SprintID:       stringPointer(current.SprintID),
+				TaskID:         stringPointer(current.TaskID),
+				EventType:      eventTaskAwaitingHuman,
+				Source:         orchestratorSource,
+				Attempt:        intPointer(current.AttemptTotal),
+				IdempotencyKey: taskEventIDKey(current.TaskID, eventTaskAwaitingHuman, current.AttemptTotal),
+				PayloadJSON: map[string]any{
+					"task_status_from":    strings.TrimSpace(current.Status),
+					"task_status_to":      targetStatus,
+					"summary":             awaitingHumanSummary,
+					"failure_fingerprint": strings.TrimSpace(result.FailureFingerprint),
+				},
+				OccurredAt: currentUTCTimestamp(),
+			}); err != nil {
+				return err
+			}
 		}
 		if shouldUpdateTaskState(current, update) {
 			if _, err := tx.UpdateTaskState(ctx, update); err != nil {
@@ -923,68 +949,6 @@ func (s *Service) recordReviewOutcome(
 		return "", taskRuntimeSnapshot{}, err
 	}
 	return eventID, updatedSnapshot, nil
-}
-
-func (s *Service) recordTaskAwaitingHuman(
-	ctx context.Context,
-	snapshot taskRuntimeSnapshot,
-	summary string,
-	failureFingerprint string,
-) (taskRuntimeSnapshot, error) {
-	err := s.store.RunInTx(ctx, func(ctx context.Context, tx store.BaseStore) error {
-		current, err := loadTaskRuntimeSnapshot(ctx, tx.DB(), snapshot.TaskID)
-		if err != nil {
-			return err
-		}
-		if err := ensureStageWriteAllowed(current, snapshot.Status, snapshot.AttemptTotal); err != nil {
-			return err
-		}
-
-		_, err = tx.AppendEvent(ctx, store.AppendEventPayload{
-			EventID:        taskEventID(current.TaskID, eventTaskAwaitingHuman, current.AttemptTotal),
-			EntityType:     "task",
-			EntityID:       current.TaskID,
-			SprintID:       stringPointer(current.SprintID),
-			TaskID:         stringPointer(current.TaskID),
-			EventType:      eventTaskAwaitingHuman,
-			Source:         orchestratorSource,
-			Attempt:        intPointer(current.AttemptTotal),
-			IdempotencyKey: taskEventIDKey(current.TaskID, eventTaskAwaitingHuman, current.AttemptTotal),
-			PayloadJSON: map[string]any{
-				"task_status_from":    strings.TrimSpace(current.Status),
-				"task_status_to":      "awaiting_human",
-				"summary":             strings.TrimSpace(summary),
-				"failure_fingerprint": strings.TrimSpace(failureFingerprint),
-			},
-			OccurredAt: currentUTCTimestamp(),
-		})
-		if err != nil {
-			return err
-		}
-
-		update := store.UpdateTaskStatePayload{
-			TaskID:                    current.TaskID,
-			Status:                    "awaiting_human",
-			CurrentFailureFingerprint: stringPointer(failureFingerprint),
-			NeedsHuman:                boolPointer(true),
-			HumanReason:               stringPointer(summary),
-		}
-		if shouldUpdateTaskState(current, update) {
-			if _, err := tx.UpdateTaskState(ctx, update); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return taskRuntimeSnapshot{}, err
-	}
-
-	base, err := s.store.BaseStore()
-	if err != nil {
-		return taskRuntimeSnapshot{}, err
-	}
-	return loadTaskRuntimeSnapshot(ctx, base.DB(), snapshot.TaskID)
 }
 
 func (s *Service) recordTaskEscalated(
@@ -1167,7 +1131,7 @@ func buildNoOpRunTaskResult(
 		TaskID:       task.TaskID,
 		SprintID:     task.SprintID,
 		Status:       task.Status,
-		Summary:      summaryForTaskStatus(task.Status),
+		Summary:      summaryForTask(task),
 		Attempt:      task.AttemptTotal,
 		NextAction:   nextActionForTaskStatus(task.Status),
 		Task:         copyTaskProjection(task.toProjection()),
@@ -1368,6 +1332,39 @@ func decisionFromReviewToolResult(result StageResult) reviewDecision {
 	// Fallback for stage results that were not processed by review-result-tool
 	// (e.g. retryable failures). Default to request_changes as safe fallback.
 	return reviewDecisionRequestChange
+}
+
+func reviewOutcomeEventType(decision reviewDecision) string {
+	switch decision {
+	case reviewDecisionPass:
+		return eventReviewPassed
+	case reviewDecisionAwaitHuman:
+		return eventReviewAwaitsHuman
+	default:
+		return eventReviewChangesReq
+	}
+}
+
+func reviewOutcomeStatus(decision reviewagg.Decision) string {
+	switch decision {
+	case reviewagg.DecisionPass:
+		return eventReviewPassed
+	case reviewagg.DecisionAwaitingHuman:
+		return eventReviewAwaitsHuman
+	default:
+		return eventReviewChangesReq
+	}
+}
+
+func reviewOutcomeNextAction(decision reviewagg.Decision) string {
+	switch decision {
+	case reviewagg.DecisionPass:
+		return "open_task_pr"
+	case reviewagg.DecisionAwaitingHuman:
+		return "await_human"
+	default:
+		return "return_to_developer"
+	}
 }
 
 func stageFailureFingerprint(stage Stage, result StageResult) string {
@@ -1672,6 +1669,16 @@ func summaryForTaskStatus(status string) string {
 	default:
 		return "task stage machine resumed without additional work"
 	}
+}
+
+func summaryForTask(task taskRuntimeSnapshot) string {
+	if reason := strings.TrimSpace(optionalString(task.HumanReason)); reason != "" {
+		switch strings.TrimSpace(task.Status) {
+		case "awaiting_human", "blocked", "escalated":
+			return reason
+		}
+	}
+	return summaryForTaskStatus(task.Status)
 }
 
 func artifactRefsForTaskStatus(status string, refs stageArtifactRefsSnapshot) agentrun.ArtifactRefs {

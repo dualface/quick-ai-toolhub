@@ -200,7 +200,7 @@ func TestRunTaskCompletesDeveloperQAReviewLoop(t *testing.T) {
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewPassed,
 	})
 }
 
@@ -315,7 +315,7 @@ func TestRunTaskRetriesTransientDeveloperFailureWithoutBlockingTask(t *testing.T
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewPassed,
 	})
 }
 
@@ -430,7 +430,7 @@ func TestRunTaskRetriesTransientQAFailureWithoutMarkingTaskFailed(t *testing.T) 
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewPassed,
 	})
 }
 
@@ -546,7 +546,7 @@ func TestRunTaskRetriesTransientReviewFailureWithoutAwaitingHuman(t *testing.T) 
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewPassed,
 	})
 }
 
@@ -684,7 +684,7 @@ func TestRunTaskReturnsToDeveloperAfterQAFailure(t *testing.T) {
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewPassed,
 	})
 }
 
@@ -861,13 +861,13 @@ func TestRunTaskReturnsToDeveloperAfterReviewFailureAndStoresFindings(t *testing
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewChangesReq,
 		eventRetryApproved,
 		eventDeveloperStarted,
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewPassed,
 	})
 }
 
@@ -1005,11 +1005,11 @@ func TestRunTaskRecoversQAAndReviewArtifactsAfterRestartFromReviewFailed(t *test
 		NextAction:   "proceed",
 		ArtifactRefs: firstQARefs,
 	})
-	appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "review_failed", eventReviewAggregated, 1, StageResult{
+	appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "review_failed", eventReviewChangesReq, 1, StageResult{
 		Stage:              StageReview,
 		AgentType:          agentrun.AgentReviewer,
 		Attempt:            1,
-		Status:             "needs_changes",
+		Status:             eventReviewChangesReq,
 		Summary:            "review requested changes",
 		NextAction:         "return_to_developer",
 		FailureFingerprint: "correctness:service.go:nil-guard",
@@ -1118,11 +1118,11 @@ func TestRunTaskNoOpReadyForPRUsesLatestReviewArtifactsWithoutFailureFingerprint
 	})
 
 	reviewRefs := artifactRefsFor("review-pass-02")
-	appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "pr_open", eventReviewAggregated, 2, StageResult{
+	appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "pr_open", eventReviewPassed, 2, StageResult{
 		Stage:        StageReview,
 		AgentType:    agentrun.AgentReviewer,
 		Attempt:      2,
-		Status:       "pass",
+		Status:       eventReviewPassed,
 		Summary:      "review passed",
 		NextAction:   "open_task_pr",
 		ArtifactRefs: reviewRefs,
@@ -1183,11 +1183,11 @@ func TestRunTaskNoOpAwaitingHumanPreservesLastReviewStageContext(t *testing.T) {
 	})
 
 	reviewRefs := artifactRefsFor("review-await-human-02")
-	appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "review_failed", eventReviewAggregated, 2, StageResult{
+	appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "awaiting_human", eventReviewAwaitsHuman, 2, StageResult{
 		Stage:              StageReview,
 		AgentType:          agentrun.AgentReviewer,
 		Attempt:            2,
-		Status:             "blocked",
+		Status:             eventReviewAwaitsHuman,
 		Summary:            "review requires human validation",
 		NextAction:         "await_human",
 		FailureFingerprint: "review:needs-human",
@@ -1251,6 +1251,9 @@ func TestRunTaskNoOpAwaitingHumanPreservesLastReviewStageContext(t *testing.T) {
 	if result.NextAction != "await_human" {
 		t.Fatalf("unexpected next action: %+v", result)
 	}
+	if result.Summary != "review requires manual validation" {
+		t.Fatalf("expected persisted human_reason summary, got %q", result.Summary)
+	}
 	if result.ArtifactRefs.Report != reviewRefs.Report {
 		t.Fatalf("expected latest review artifact refs, got %+v", result.ArtifactRefs)
 	}
@@ -1266,9 +1269,9 @@ func TestDecisionFromReviewToolResultMapsStructuredDecision(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name     string
-		result   StageResult
-		want     reviewDecision
+		name   string
+		result StageResult
+		want   reviewDecision
 	}{
 		{
 			name: "tool decision pass maps to review pass",
@@ -1400,11 +1403,11 @@ func TestPersistReviewFindingsRejectsInvalidFindingContract(t *testing.T) {
 				WorktreePath:            &worktreePath,
 			})
 
-			appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "review_failed", eventReviewAggregated, 2, StageResult{
+			appendOrchestratorStageEvent(t, storeService, "Sprint-04/Task-02", "Sprint-04", "review_in_progress", "review_failed", eventReviewChangesReq, 2, StageResult{
 				Stage:        StageReview,
 				AgentType:    agentrun.AgentReviewer,
 				Attempt:      2,
-				Status:       "needs_changes",
+				Status:       eventReviewChangesReq,
 				Summary:      "review requested changes",
 				NextAction:   "return_to_developer",
 				ArtifactRefs: artifactRefsFor("review-invalid-02"),
@@ -1419,7 +1422,7 @@ func TestPersistReviewFindingsRejectsInvalidFindingContract(t *testing.T) {
 				context.Background(),
 				db,
 				"Sprint-04/Task-02",
-				taskEventID("Sprint-04/Task-02", eventReviewAggregated, 2),
+				taskEventID("Sprint-04/Task-02", eventReviewChangesReq, 2),
 				[]agentrun.Finding{tc.finding},
 			)
 			if err == nil {
@@ -1764,7 +1767,7 @@ func TestRunReviewStageRejectsBlockingDecisionWithoutFindings(t *testing.T) {
 			runner.assertExhausted(t)
 
 			// invalid_request maps to return_to_developer, not retryable reviewer retry.
-			if result.Status != "failed" || result.NextAction != "return_to_developer" {
+			if result.Status != eventReviewChangesReq || result.NextAction != "return_to_developer" {
 				t.Fatalf("expected invalid_request review to return_to_developer, got %+v", result)
 			}
 			if result.FailureFingerprint != "review-result-tool:invalid_request" {
@@ -1879,7 +1882,7 @@ func TestRunReviewStageRejectsInvalidFindingEnums(t *testing.T) {
 			runner.assertExhausted(t)
 
 			// invalid_request maps to return_to_developer, not retryable reviewer retry.
-			if result.Status != "failed" || result.NextAction != "return_to_developer" {
+			if result.Status != eventReviewChangesReq || result.NextAction != "return_to_developer" {
 				t.Fatalf("expected invalid finding enum to return_to_developer, got %+v", result)
 			}
 			if result.FailureFingerprint != "review-result-tool:invalid_request" {
@@ -2050,8 +2053,8 @@ func TestRunReviewStageDedupesDuplicateFindingsFromSingleReviewer(t *testing.T) 
 	}
 	runner.assertExhausted(t)
 
-	if stageResult.Status != "request_changes" || stageResult.NextAction != "return_to_developer" {
-		t.Fatalf("expected reviewer decision to be preserved, got %+v", stageResult)
+	if stageResult.Status != eventReviewChangesReq || stageResult.NextAction != "return_to_developer" {
+		t.Fatalf("expected canonical review outcome, got %+v", stageResult)
 	}
 	if len(stageResult.Findings) != 1 {
 		t.Fatalf("expected duplicate findings to collapse into one entry, got %+v", stageResult.Findings)
@@ -2083,10 +2086,10 @@ func TestRunReviewStageDedupesDuplicateFindingsFromSingleReviewer(t *testing.T) 
 		t.Fatalf("expected persisted finding to keep reviewer attribution and strongest severity, got %+v", persisted[0])
 	}
 
-	payload := loadOrchestratorEventPayload(t, storeService, eventReviewAggregated)
+	payload := loadOrchestratorEventPayload(t, storeService, eventReviewChangesReq)
 	stageResultPayload, ok := payload["stage_result"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected review_aggregated payload to contain stage_result, got %+v", payload)
+		t.Fatalf("expected canonical review outcome payload to contain stage_result, got %+v", payload)
 	}
 	findingsPayload, ok := stageResultPayload["findings"].([]any)
 	if !ok || len(findingsPayload) != 1 {
@@ -2241,7 +2244,7 @@ func TestHandleReviewPassClearsFailureAndHumanMetadata(t *testing.T) {
 		t.Fatalf("expected human_reason to clear after review pass, got %#v", taskRow.HumanReason)
 	}
 
-	assertOrchestratorEventTypes(t, storeService, []string{eventReviewAggregated})
+	assertOrchestratorEventTypes(t, storeService, []string{eventReviewPassed})
 }
 
 func TestRunTaskUsesConfiguredSingleReviewerLens(t *testing.T) {
@@ -2324,6 +2327,9 @@ func TestRunTaskUsesConfiguredSingleReviewerLens(t *testing.T) {
 	}
 	if len(result.StageResults) != 3 || result.StageResults[2].TaskStatus != "pr_open" {
 		t.Fatalf("unexpected review stage result: %+v", result.StageResults)
+	}
+	if result.StageResults[2].Status != eventReviewPassed || result.StageResults[2].NextAction != "open_task_pr" {
+		t.Fatalf("expected canonical review pass stage result, got %+v", result.StageResults[2])
 	}
 }
 
@@ -2421,6 +2427,9 @@ func TestRunTaskMovesReviewerEscalationToAwaitingHuman(t *testing.T) {
 	if len(result.StageResults) != 3 || result.StageResults[2].TaskStatus != "awaiting_human" {
 		t.Fatalf("unexpected review stage result: %+v", result.StageResults)
 	}
+	if result.StageResults[2].Status != eventReviewAwaitsHuman || result.StageResults[2].NextAction != "await_human" {
+		t.Fatalf("expected canonical review awaiting_human stage result, got %+v", result.StageResults[2])
+	}
 
 	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-02")
 	if taskRow.Status != "awaiting_human" || !taskRow.NeedsHuman {
@@ -2432,7 +2441,7 @@ func TestRunTaskMovesReviewerEscalationToAwaitingHuman(t *testing.T) {
 		eventDeveloperCompleted,
 		eventQAPassed,
 		eventReviewStarted,
-		eventReviewAggregated,
+		eventReviewAwaitsHuman,
 		eventTaskAwaitingHuman,
 	})
 }
@@ -3435,6 +3444,19 @@ func TestReviewResultToolDecisionDrivesOrchestratorFlow(t *testing.T) {
 			if gotDecision != tc.expectedDecision {
 				t.Fatalf("expected decision %s, got %s", tc.expectedDecision, gotDecision)
 			}
+			wantStageStatus := eventReviewChangesReq
+			wantNextAction := "return_to_developer"
+			switch tc.expectedDecision {
+			case reviewDecisionPass:
+				wantStageStatus = eventReviewPassed
+				wantNextAction = "open_task_pr"
+			case reviewDecisionAwaitHuman:
+				wantStageStatus = eventReviewAwaitsHuman
+				wantNextAction = "await_human"
+			}
+			if stageResult.Status != wantStageStatus || stageResult.NextAction != wantNextAction {
+				t.Fatalf("expected canonical stage outcome %s/%s, got %+v", wantStageStatus, wantNextAction, stageResult)
+			}
 
 			// Run handleReviewResult and verify task status.
 			_, updatedSnapshot, err := service.handleReviewResult(context.Background(), snapshot, stageResult, rawFindings)
@@ -3517,8 +3539,8 @@ func TestReviewResultToolInvalidRequestReturnsToDeveloper(t *testing.T) {
 
 	// invalid_request is NOT retryable — it flows through handleReviewResult as
 	// request_changes, mapping to review_failed → Developer on next loop iteration.
-	if result.Status != "failed" {
-		t.Fatalf("expected failed status for invalid_request, got %s", result.Status)
+	if result.Status != eventReviewChangesReq {
+		t.Fatalf("expected canonical review_changes_requested status for invalid_request, got %s", result.Status)
 	}
 	if result.NextAction != "return_to_developer" {
 		t.Fatalf("expected return_to_developer next action, got %s", result.NextAction)
@@ -3725,6 +3747,9 @@ func TestReviewResultToolEscalationOverridesFindings(t *testing.T) {
 	// Verify escalation takes priority over blocking findings.
 	if stageResult.reviewToolDecision == nil {
 		t.Fatalf("expected reviewToolDecision to be set")
+	}
+	if stageResult.Summary != "decision=awaiting_human; review_findings=1; blocking finding present; reviewer escalation present" {
+		t.Fatalf("expected structured review summary, got %q", stageResult.Summary)
 	}
 	if !stageResult.reviewToolDecision.HasReviewerEscalation {
 		t.Fatalf("expected HasReviewerEscalation=true")
@@ -3998,6 +4023,14 @@ func TestRunTaskAwaitingHumanIsAtomicRecovery(t *testing.T) {
 	}
 	if len(result2.StageResults) != 0 {
 		t.Fatalf("expected no stage results on recovery no-op, got %d", len(result2.StageResults))
+	}
+
+	awaitingPayload := loadOrchestratorEventPayload(t, storeService, eventTaskAwaitingHuman)
+	if got := awaitingPayload["task_status_from"]; got != "review_in_progress" {
+		t.Fatalf("expected awaiting_human handoff to be emitted from review_in_progress, got %#v", got)
+	}
+	if got := awaitingPayload["task_status_to"]; got != "awaiting_human" {
+		t.Fatalf("expected awaiting_human handoff target, got %#v", got)
 	}
 }
 
