@@ -40,6 +40,7 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 		Args:           []string{"sh", "-c", "printf '%s\n' '{\"type\":\"thread.started\"}' '{\"type\":\"item.updated\",\"item\":{\"type\":\"todo_list\",\"items\":[{\"text\":\"first\",\"completed\":true},{\"text\":\"second\",\"completed\":false}]}}' '{\"type\":\"turn.completed\"}'"},
 		ProgressWriter: &progress,
 		Metadata: CommandMetadata{
+			Runner:  "codex-cli",
 			Model:   "gpt-5-codex",
 			Sandbox: "workspace-write",
 			EnvKeys: []string{"TMPDIR", "GOCACHE", "GOMODCACHE", "XDG_CACHE_HOME"},
@@ -61,6 +62,7 @@ func TestExecCommandRunnerProgressWriterSummarizesEvents(t *testing.T) {
 
 	got := progress.String()
 	for _, needle := range []string{
+		"[progress] runner: codex-cli",
 		"[progress] model: gpt-5-codex",
 		"[progress] sandbox: workspace-write",
 		"[progress] env TMPDIR: /repo/.toolhub/runtime/tmp",
@@ -117,6 +119,7 @@ func TestExecCommandRunnerStreamOutputsMetadata(t *testing.T) {
 		StdoutWriter: &stream,
 		StderrWriter: &stream,
 		Metadata: CommandMetadata{
+			Runner:  "codex-cli",
 			Model:   "gpt-5-codex",
 			Sandbox: "workspace-write",
 			EnvKeys: []string{"TMPDIR"},
@@ -131,6 +134,7 @@ func TestExecCommandRunnerStreamOutputsMetadata(t *testing.T) {
 
 	got := stream.String()
 	for _, needle := range []string{
+		"[meta] runner: codex-cli",
 		"[meta] model: gpt-5-codex",
 		"[meta] sandbox: workspace-write",
 		"[meta] env TMPDIR: /repo/.toolhub/runtime/tmp",

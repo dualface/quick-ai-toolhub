@@ -25,6 +25,7 @@ type CommandRequest struct {
 }
 
 type CommandMetadata struct {
+	Runner      string
 	Model       string
 	Sandbox     string
 	EnvKeys     []string
@@ -91,6 +92,9 @@ func writeCommandMetadata(stream, progress io.Writer, meta CommandMetadata) {
 
 func formatCommandMetadata(meta CommandMetadata) []string {
 	var lines []string
+	if strings.TrimSpace(meta.Runner) != "" {
+		lines = append(lines, fmt.Sprintf("runner: %s", meta.Runner))
+	}
 	if strings.TrimSpace(meta.Model) != "" {
 		lines = append(lines, fmt.Sprintf("model: %s", meta.Model))
 	}

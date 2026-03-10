@@ -128,6 +128,7 @@ func (e *Executor) RunTask(ctx context.Context, opts RunOptions) (Result, error)
 	cmdReq.ProgressWriter = opts.ProgressOutput
 	envKeys := commandEnvKeys(opts)
 	cmdReq.Metadata = CommandMetadata{
+		Runner:      string(effectiveRunner(opts)),
 		Model:       effectiveModel(opts),
 		Sandbox:     effectivePermissionMode(opts),
 		EnvKeys:     envKeys,
