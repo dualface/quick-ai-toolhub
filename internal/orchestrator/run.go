@@ -12,6 +12,7 @@ import (
 	"github.com/uptrace/bun"
 
 	"quick-ai-toolhub/internal/agentrun"
+	"quick-ai-toolhub/internal/reviewagg"
 	"quick-ai-toolhub/internal/store"
 )
 
@@ -483,32 +484,77 @@ func (s *Service) runReviewStage(
 		return result, nil, nil
 	}
 
-	normalizedFindings, err := normalizeFindings(result.Findings, lens)
-	if err != nil {
-		return *retryableMalformedReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, err), nil, nil
-	}
-	if err := validateReviewObservationContract(result, normalizedFindings, lens); err != nil {
-		return *retryableMalformedReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, err), nil, nil
+	// Derive reviewer_id from agent result or generate default.
+	reviewerID := reviewerIDFromResult(result, lens, snapshot.AttemptTotal)
+
+	// Call review-result-tool for schema validation, normalization, and decision.
+	aggResp := s.reviewAgg.Execute(ctx, reviewagg.Request{
+		TaskID:   snapshot.TaskID,
+		SprintID: snapshot.SprintID,
+		ReviewResult: reviewagg.ReviewResult{
+			ReviewerID: reviewerID,
+			Lens:       lens,
+			Status:     strings.TrimSpace(result.Status),
+			Findings:   copyFindings(result.Findings),
+		},
+	})
+
+	if !aggResp.OK {
+		// review-result-tool returned ok=false / invalid_request:
+		// treat as current review attempt failure, return to Developer (not retry reviewer).
+		errMsg := "review-result-tool validation failed"
+		if aggResp.Error != nil {
+			errMsg = aggResp.Error.Message
+		}
+		return *invalidRequestReviewResult(snapshot.AttemptTotal, result.ArtifactRefs, errors.New(errMsg)), nil, nil
 	}
 
-	dedupedFindings := dedupePersistedReviewFindings(normalizedFindings)
+	// Consume the tool's normalized findings and structured decision.
+	dedupedFindings := dedupePersistedReviewFindings(aggResp.Data.ReviewFindings)
 	result.Findings = copyFindings(dedupedFindings)
 	result.Stage = StageReview
 	result.AgentType = agentrun.AgentReviewer
 	result.Attempt = snapshot.AttemptTotal
+
+	// Attach review-result-tool decision metadata to the stage result for downstream consumption.
+	result.reviewToolDecision = &reviewToolDecisionMeta{
+		Decision:              aggResp.Data.Decision,
+		HasCriticalFinding:    aggResp.Data.HasCriticalFinding,
+		HasBlockingFinding:    aggResp.Data.HasBlockingFinding,
+		HasReviewerEscalation: aggResp.Data.HasReviewerEscalation,
+		Summary:               aggResp.Data.Summary,
+	}
+
 	return result, copyFindings(dedupedFindings), nil
 }
 
-func retryableMalformedReviewResult(attempt int, refs agentrun.ArtifactRefs, err error) *StageResult {
+func reviewerIDFromResult(result StageResult, lens string, attempt int) string {
+	// Try to extract reviewer_id from findings if present.
+	for _, f := range result.Findings {
+		if id := strings.TrimSpace(f.ReviewerID); id != "" {
+			return id
+		}
+	}
+	return fmt.Sprintf("reviewer-%s-%d", strings.TrimSpace(lens), attempt)
+}
+
+// invalidRequestReviewResult creates a non-retryable review result for review-result-tool
+// invalid_request errors. The result flows through handleReviewResult as request_changes,
+// mapping to review_failed which returns to Developer on the next loop iteration.
+func invalidRequestReviewResult(attempt int, refs agentrun.ArtifactRefs, err error) *StageResult {
 	return &StageResult{
 		Stage:              StageReview,
 		AgentType:          agentrun.AgentReviewer,
 		Attempt:            attempt,
 		Status:             "failed",
-		Summary:            fmt.Sprintf("review output rejected: %s", err),
-		NextAction:         "retry",
-		FailureFingerprint: agentrun.ErrorCodeMalformedOutput,
+		Summary:            fmt.Sprintf("review-result-tool invalid_request: %s", err),
+		NextAction:         "return_to_developer",
+		FailureFingerprint: "review-result-tool:invalid_request",
 		ArtifactRefs:       refs,
+		reviewToolDecision: &reviewToolDecisionMeta{
+			Decision: reviewagg.DecisionRequestChanges,
+			Summary:  fmt.Sprintf("review-result-tool invalid_request: %s", err),
+		},
 	}
 }
 
@@ -606,7 +652,9 @@ func (s *Service) handleReviewResult(ctx context.Context, snapshot taskRuntimeSn
 		return retryableStageResult(snapshot, result), snapshot, nil
 	}
 
-	decision := classifyReviewResult(result)
+	// The orchestrator ONLY consumes review-result-tool's structured decision.
+	// It does NOT directly parse the reviewer's raw status or next_action.
+	decision := decisionFromReviewToolResult(result)
 	targetStatus := "review_failed"
 	update := store.UpdateTaskStatePayload{
 		TaskID:          snapshot.TaskID,
@@ -623,6 +671,14 @@ func (s *Service) handleReviewResult(ctx context.Context, snapshot taskRuntimeSn
 		update.ReviewFailCount = intPointer(0)
 		update.CurrentFailureFingerprint = emptyStringPointer()
 	case reviewDecisionAwaitHuman:
+		// Atomic: set target status directly to awaiting_human so a crash between
+		// recordReviewOutcome and recordTaskAwaitingHuman cannot leave the task in
+		// review_failed (which would incorrectly return to Developer).
+		targetStatus = "awaiting_human"
+		update.Status = targetStatus
+		update.ReviewFailCount = intPointer(0)
+		update.NeedsHuman = boolPointer(true)
+		update.HumanReason = stringPointer(awaitingHumanReason(result))
 		if strings.TrimSpace(result.FailureFingerprint) == "" {
 			result.FailureFingerprint = reviewFailureFingerprint(snapshot.AttemptTotal, result.Findings, "awaiting_human")
 		}
@@ -1295,26 +1351,23 @@ func retryableStageResult(snapshot taskRuntimeSnapshot, result StageResult) Stag
 	return result
 }
 
-func classifyReviewResult(result StageResult) reviewDecision {
-	switch normalizeNextAction(result.NextAction) {
-	case "await_human":
-		return reviewDecisionAwaitHuman
-	case "return_to_developer":
-		return reviewDecisionRequestChange
-	case "open_task_pr":
-		return reviewDecisionPass
+// decisionFromReviewToolResult maps the review-result-tool's structured decision
+// to the orchestrator's internal reviewDecision. The orchestrator ONLY consumes
+// the tool's decision field; it does NOT parse the reviewer's raw status.
+func decisionFromReviewToolResult(result StageResult) reviewDecision {
+	if result.reviewToolDecision != nil {
+		switch result.reviewToolDecision.Decision {
+		case reviewagg.DecisionPass:
+			return reviewDecisionPass
+		case reviewagg.DecisionRequestChanges:
+			return reviewDecisionRequestChange
+		case reviewagg.DecisionAwaitingHuman:
+			return reviewDecisionAwaitHuman
+		}
 	}
-
-	switch strings.ToLower(strings.TrimSpace(result.Status)) {
-	case "blocked":
-		return reviewDecisionAwaitHuman
-	case "needs_changes":
-		return reviewDecisionRequestChange
-	case "pass":
-		return reviewDecisionPass
-	default:
-		return reviewDecisionRequestChange
-	}
+	// Fallback for stage results that were not processed by review-result-tool
+	// (e.g. retryable failures). Default to request_changes as safe fallback.
+	return reviewDecisionRequestChange
 }
 
 func stageFailureFingerprint(stage Stage, result StageResult) string {
@@ -1322,6 +1375,13 @@ func stageFailureFingerprint(stage Stage, result StageResult) string {
 		return strings.TrimSpace(result.FailureFingerprint)
 	}
 	return fmt.Sprintf("%s:%s:%s", stage, strings.TrimSpace(result.Status), strings.TrimSpace(result.NextAction))
+}
+
+func awaitingHumanReason(result StageResult) string {
+	if s := strings.TrimSpace(result.Summary); s != "" {
+		return s
+	}
+	return "reviewer escalated to human"
 }
 
 func blockedHumanReason(result StageResult) string {
@@ -1404,42 +1464,6 @@ func normalizedReviewerLens(rawLens string) (string, error) {
 		return "", fmt.Errorf("invalid reviewer lens %q (allowed: %s)", rawLens, strings.Join(agentrun.AllowedReviewerLenses(), ", "))
 	}
 	return lens, nil
-}
-
-func validateReviewObservationContract(result StageResult, findings []agentrun.Finding, lens string) error {
-	if len(findings) > 0 || reviewObservationAllowsEmptyFindings(result.Status) {
-		return nil
-	}
-
-	normalizedLens, ok := agentrun.NormalizeReviewerLens(lens)
-	if !ok {
-		normalizedLens = strings.TrimSpace(lens)
-	}
-	if normalizedLens == "" {
-		normalizedLens = defaultReviewerLens
-	}
-	return fmt.Errorf("reviewer lens %s returned %s without structured findings", normalizedLens, strings.ToLower(strings.TrimSpace(result.Status)))
-}
-
-func reviewObservationAllowsEmptyFindings(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "success", "completed", "pass", "passed", "passed_with_warning":
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizeFindings(findings []agentrun.Finding, fallbackLens string) ([]agentrun.Finding, error) {
-	normalized := make([]agentrun.Finding, 0, len(findings))
-	for _, finding := range findings {
-		normalizedFinding, err := normalizeReviewFinding(finding, fallbackLens)
-		if err != nil {
-			return nil, err
-		}
-		normalized = append(normalized, normalizedFinding)
-	}
-	return normalized, nil
 }
 
 func normalizeReviewFinding(finding agentrun.Finding, fallbackLens string) (agentrun.Finding, error) {

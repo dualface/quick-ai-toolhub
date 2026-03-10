@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"quick-ai-toolhub/internal/agentrun"
+	"quick-ai-toolhub/internal/reviewagg"
 	"quick-ai-toolhub/internal/store"
 )
 
@@ -741,7 +742,7 @@ func TestRunTaskReturnsToDeveloperAfterReviewFailureAndStoresFindings(t *testing
 				attempt:   1,
 				lens:      "correctness",
 				result: agentrun.Result{
-					Status:       "needs_changes",
+					Status:       "request_changes",
 					Summary:      "review found gaps",
 					NextAction:   "return_to_developer",
 					ArtifactRefs: firstReviewRefs,
@@ -1261,45 +1262,50 @@ func TestRunTaskNoOpAwaitingHumanPreservesLastReviewStageContext(t *testing.T) {
 	}
 }
 
-func TestClassifyReviewResultNormalizesNextAction(t *testing.T) {
+func TestDecisionFromReviewToolResultMapsStructuredDecision(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name   string
-		result StageResult
-		want   reviewDecision
+		name     string
+		result   StageResult
+		want     reviewDecision
 	}{
 		{
-			name: "await human mixed case",
+			name: "tool decision pass maps to review pass",
 			result: StageResult{
-				Status:     "pass",
-				NextAction: "Await_Human",
+				reviewToolDecision: &reviewToolDecisionMeta{
+					Decision: reviewagg.DecisionPass,
+				},
 			},
-			want: reviewDecisionAwaitHuman,
+			want: reviewDecisionPass,
 		},
 		{
-			name: "return to developer mixed case",
+			name: "tool decision request_changes maps to review request_changes",
 			result: StageResult{
-				Status:     "pass",
-				NextAction: "RETURN_TO_DEVELOPER",
+				reviewToolDecision: &reviewToolDecisionMeta{
+					Decision:           reviewagg.DecisionRequestChanges,
+					HasBlockingFinding: true,
+				},
 			},
 			want: reviewDecisionRequestChange,
 		},
 		{
-			name: "open task pr mixed case",
+			name: "tool decision awaiting_human maps to review await_human",
 			result: StageResult{
-				Status:     "pass",
-				NextAction: "OPEN_TASK_PR",
+				reviewToolDecision: &reviewToolDecisionMeta{
+					Decision:              reviewagg.DecisionAwaitingHuman,
+					HasReviewerEscalation: true,
+				},
 			},
-			want: reviewDecisionPass,
+			want: reviewDecisionAwaitHuman,
 		},
 		{
-			name: "reviewer hint does not override pass aggregate",
+			name: "nil tool decision defaults to request_changes",
 			result: StageResult{
 				Status:     "pass",
-				NextAction: "needs_fix",
+				NextAction: "open_task_pr",
 			},
-			want: reviewDecisionPass,
+			want: reviewDecisionRequestChange,
 		},
 	}
 
@@ -1307,7 +1313,7 @@ func TestClassifyReviewResultNormalizesNextAction(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := classifyReviewResult(tc.result); got != tc.want {
+			if got := decisionFromReviewToolResult(tc.result); got != tc.want {
 				t.Fatalf("unexpected decision: got %s want %s for %+v", got, tc.want, tc.result)
 			}
 		})
@@ -1688,13 +1694,8 @@ func TestRunReviewStageRejectsBlockingDecisionWithoutFindings(t *testing.T) {
 	}{
 		{
 			name:       "request changes without findings",
-			status:     "needs_changes",
+			status:     "request_changes",
 			nextAction: "return_to_developer",
-		},
-		{
-			name:       "await human without findings",
-			status:     "blocked",
-			nextAction: "await_human",
 		},
 	}
 
@@ -1762,17 +1763,18 @@ func TestRunReviewStageRejectsBlockingDecisionWithoutFindings(t *testing.T) {
 			}
 			runner.assertExhausted(t)
 
-			if result.Status != "failed" || result.NextAction != "retry" {
-				t.Fatalf("expected malformed review output to request retry, got %+v", result)
+			// invalid_request maps to return_to_developer, not retryable reviewer retry.
+			if result.Status != "failed" || result.NextAction != "return_to_developer" {
+				t.Fatalf("expected invalid_request review to return_to_developer, got %+v", result)
 			}
-			if result.FailureFingerprint != agentrun.ErrorCodeMalformedOutput {
+			if result.FailureFingerprint != "review-result-tool:invalid_request" {
 				t.Fatalf("unexpected failure fingerprint: %+v", result)
 			}
 			if result.ArtifactRefs.Report != reviewRefs.Report {
 				t.Fatalf("expected reviewer artifact refs to be preserved, got %+v", result.ArtifactRefs)
 			}
-			if !strings.Contains(result.Summary, "without structured findings") {
-				t.Fatalf("unexpected retry summary: %s", result.Summary)
+			if !strings.Contains(result.Summary, "requires at least one finding") {
+				t.Fatalf("unexpected summary: %s", result.Summary)
 			}
 		})
 	}
@@ -1842,9 +1844,9 @@ func TestRunReviewStageRejectsInvalidFindingEnums(t *testing.T) {
 						attempt:   2,
 						lens:      "correctness",
 						result: agentrun.Result{
-							Status:       "completed_with_findings",
+							Status:       "request_changes",
 							Summary:      "review reported an invalid finding enum",
-							NextAction:   "needs_changes",
+							NextAction:   "return_to_developer",
 							ArtifactRefs: reviewRefs,
 							Findings: []agentrun.Finding{
 								{
@@ -1876,10 +1878,11 @@ func TestRunReviewStageRejectsInvalidFindingEnums(t *testing.T) {
 			}
 			runner.assertExhausted(t)
 
-			if result.Status != "failed" || result.NextAction != "retry" {
-				t.Fatalf("expected invalid finding enum to request retry, got %+v", result)
+			// invalid_request maps to return_to_developer, not retryable reviewer retry.
+			if result.Status != "failed" || result.NextAction != "return_to_developer" {
+				t.Fatalf("expected invalid finding enum to return_to_developer, got %+v", result)
 			}
-			if result.FailureFingerprint != agentrun.ErrorCodeMalformedOutput {
+			if result.FailureFingerprint != "review-result-tool:invalid_request" {
 				t.Fatalf("unexpected failure fingerprint: %+v", result)
 			}
 			if result.ArtifactRefs.Report != reviewRefs.Report {
@@ -2001,7 +2004,7 @@ func TestRunReviewStageDedupesDuplicateFindingsFromSingleReviewer(t *testing.T) 
 				attempt:   3,
 				lens:      "correctness",
 				result: agentrun.Result{
-					Status:       "needs_changes",
+					Status:       "request_changes",
 					Summary:      "correctness review found a blocking issue",
 					NextAction:   "return_to_developer",
 					ArtifactRefs: artifactRefsFor("review-correctness-03"),
@@ -2047,7 +2050,7 @@ func TestRunReviewStageDedupesDuplicateFindingsFromSingleReviewer(t *testing.T) 
 	}
 	runner.assertExhausted(t)
 
-	if stageResult.Status != "needs_changes" || stageResult.NextAction != "return_to_developer" {
+	if stageResult.Status != "request_changes" || stageResult.NextAction != "return_to_developer" {
 		t.Fatalf("expected reviewer decision to be preserved, got %+v", stageResult)
 	}
 	if len(stageResult.Findings) != 1 {
@@ -2206,6 +2209,9 @@ func TestHandleReviewPassClearsFailureAndHumanMetadata(t *testing.T) {
 		Summary:      "review passed",
 		NextAction:   "open_task_pr",
 		ArtifactRefs: artifactRefsFor("review-pass-02"),
+		reviewToolDecision: &reviewToolDecisionMeta{
+			Decision: reviewagg.DecisionPass,
+		},
 	}, nil)
 	if err != nil {
 		t.Fatalf("handle review result: %v", err)
@@ -2373,7 +2379,7 @@ func TestRunTaskMovesReviewerEscalationToAwaitingHuman(t *testing.T) {
 				attempt:   1,
 				lens:      "correctness",
 				result: agentrun.Result{
-					Status:       "blocked",
+					Status:       "awaiting_human",
 					Summary:      "review needs a human decision on a low-confidence race condition",
 					NextAction:   "await_human",
 					ArtifactRefs: artifactRefsFor("review-01"),
@@ -3285,6 +3291,714 @@ func stringPtr(value string) *string {
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+// --- review-result-tool integration contract tests ---
+
+// TestReviewResultToolDecisionDrivesOrchestratorFlow verifies the orchestrator
+// only consumes review-result-tool's structured decision for flow control.
+func TestReviewResultToolDecisionDrivesOrchestratorFlow(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name               string
+		reviewerStatus     string
+		findings           []agentrun.Finding
+		expectedTaskStatus string
+		expectedDecision   reviewDecision
+	}{
+		{
+			name:               "pass decision opens task PR",
+			reviewerStatus:     "pass",
+			findings:           nil,
+			expectedTaskStatus: "pr_open",
+			expectedDecision:   reviewDecisionPass,
+		},
+		{
+			name:           "request_changes decision returns to developer via review_failed",
+			reviewerStatus: "request_changes",
+			findings: []agentrun.Finding{
+				{
+					ReviewerID:         "reviewer-correctness",
+					Lens:               "correctness",
+					Severity:           "high",
+					Confidence:         "high",
+					Category:           "correctness",
+					FileRefs:           []string{"internal/run.go"},
+					Summary:            "missing error handling",
+					Evidence:           "error is ignored on line 42",
+					FindingFingerprint: "correctness:run.go:missing-error",
+					SuggestedAction:    "add error check",
+				},
+			},
+			expectedTaskStatus: "review_failed",
+			expectedDecision:   reviewDecisionRequestChange,
+		},
+		{
+			name:           "awaiting_human decision escalates to human",
+			reviewerStatus: "awaiting_human",
+			findings: []agentrun.Finding{
+				{
+					ReviewerID:         "reviewer-correctness",
+					Lens:               "correctness",
+					Severity:           "medium",
+					Confidence:         "low",
+					Category:           "correctness",
+					FileRefs:           []string{"internal/run.go"},
+					Summary:            "unclear intent",
+					Evidence:           "logic seems correct but intent is ambiguous",
+					FindingFingerprint: "correctness:run.go:unclear-intent",
+					SuggestedAction:    "human review needed",
+				},
+			},
+			expectedTaskStatus: "awaiting_human",
+			expectedDecision:   reviewDecisionAwaitHuman,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			storeService := openOrchestratorTestStore(t)
+			worktreePath := t.TempDir()
+			insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+				SprintID:          "Sprint-04",
+				SequenceNo:        4,
+				GitHubIssueNumber: 401,
+				Status:            "in_progress",
+			})
+			insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+				TaskID:                  "Sprint-04/Task-02",
+				SprintID:                "Sprint-04",
+				TaskLocalID:             "Task-02",
+				SequenceNo:              2,
+				GitHubIssueNumber:       402,
+				ParentGitHubIssueNumber: 401,
+				Status:                  "review_in_progress",
+				AttemptTotal:            1,
+				TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+				WorktreePath:            &worktreePath,
+			})
+
+			runner := &fakeAgentRunner{
+				t: t,
+				steps: []fakeAgentStep{
+					{
+						agentType: agentrun.AgentReviewer,
+						attempt:   1,
+						lens:      "correctness",
+						result: agentrun.Result{
+							Status:       tc.reviewerStatus,
+							Summary:      "reviewer result",
+							NextAction:   "some_action",
+							ArtifactRefs: artifactRefsFor("review-01"),
+							Findings:     tc.findings,
+						},
+					},
+				},
+			}
+
+			service := New(Dependencies{
+				Store:       storeService,
+				AgentRunner: runner,
+			})
+
+			db, err := storeService.DB()
+			if err != nil {
+				t.Fatalf("store db: %v", err)
+			}
+			snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+			if err != nil {
+				t.Fatalf("load snapshot: %v", err)
+			}
+
+			// Mark review started first.
+			snapshot, err = service.markReviewStarted(context.Background(), snapshot)
+			if err != nil {
+				t.Fatalf("mark review started: %v", err)
+			}
+
+			stageResult, rawFindings, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", agentrun.ArtifactRefs{})
+			if err != nil {
+				t.Fatalf("run review stage: %v", err)
+			}
+			runner.assertExhausted(t)
+
+			// Verify that reviewToolDecision is populated by runReviewStage.
+			if stageResult.reviewToolDecision == nil {
+				t.Fatalf("expected reviewToolDecision to be set by runReviewStage")
+			}
+
+			// Verify the decision matches expectations.
+			gotDecision := decisionFromReviewToolResult(stageResult)
+			if gotDecision != tc.expectedDecision {
+				t.Fatalf("expected decision %s, got %s", tc.expectedDecision, gotDecision)
+			}
+
+			// Run handleReviewResult and verify task status.
+			_, updatedSnapshot, err := service.handleReviewResult(context.Background(), snapshot, stageResult, rawFindings)
+			if err != nil {
+				t.Fatalf("handle review result: %v", err)
+			}
+			if updatedSnapshot.Status != tc.expectedTaskStatus {
+				t.Fatalf("expected task status %s, got %s", tc.expectedTaskStatus, updatedSnapshot.Status)
+			}
+		})
+	}
+}
+
+// TestReviewResultToolInvalidRequestReturnsToDeveloper verifies that when
+// review-result-tool returns ok=false with invalid_request, the orchestrator
+// maps it to review_failed which returns to Developer (not a retryable reviewer retry).
+func TestReviewResultToolInvalidRequestReturnsToDeveloper(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-02",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       402,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "review_in_progress",
+		AttemptTotal:            1,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+		WorktreePath:            &worktreePath,
+	})
+
+	// Reviewer returns request_changes without findings, which review-result-tool
+	// rejects as invalid_request (request_changes requires at least one finding).
+	runner := &fakeAgentRunner{
+		t: t,
+		steps: []fakeAgentStep{
+			{
+				agentType: agentrun.AgentReviewer,
+				attempt:   1,
+				lens:      "correctness",
+				result: agentrun.Result{
+					Status:       "request_changes",
+					Summary:      "review wants changes but forgot findings",
+					NextAction:   "return_to_developer",
+					ArtifactRefs: artifactRefsFor("review-01"),
+					// No findings - this violates the review-result-tool contract.
+				},
+			},
+		},
+	}
+
+	service := New(Dependencies{
+		Store:       storeService,
+		AgentRunner: runner,
+	})
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+
+	result, _, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", agentrun.ArtifactRefs{})
+	if err != nil {
+		t.Fatalf("run review stage: %v", err)
+	}
+	runner.assertExhausted(t)
+
+	// invalid_request is NOT retryable — it flows through handleReviewResult as
+	// request_changes, mapping to review_failed → Developer on next loop iteration.
+	if result.Status != "failed" {
+		t.Fatalf("expected failed status for invalid_request, got %s", result.Status)
+	}
+	if result.NextAction != "return_to_developer" {
+		t.Fatalf("expected return_to_developer next action, got %s", result.NextAction)
+	}
+	if result.FailureFingerprint != "review-result-tool:invalid_request" {
+		t.Fatalf("expected invalid_request fingerprint, got %s", result.FailureFingerprint)
+	}
+	// Must carry a request_changes decision so handleReviewResult maps it to review_failed.
+	if result.reviewToolDecision == nil || result.reviewToolDecision.Decision != reviewagg.DecisionRequestChanges {
+		t.Fatalf("expected request_changes reviewToolDecision for invalid_request, got %+v", result.reviewToolDecision)
+	}
+}
+
+// TestReviewResultToolBlockingFindingsForcesRequestChanges verifies that
+// critical or high severity findings in review-result-tool output force
+// the decision to request_changes, even if the reviewer said pass.
+func TestReviewResultToolBlockingFindingsForcesRequestChanges(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-02",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       402,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "review_in_progress",
+		AttemptTotal:            1,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+		WorktreePath:            &worktreePath,
+	})
+
+	criticalFinding := agentrun.Finding{
+		ReviewerID:         "reviewer-correctness",
+		Lens:               "correctness",
+		Severity:           "critical",
+		Confidence:         "high",
+		Category:           "correctness",
+		FileRefs:           []string{"internal/run.go"},
+		Summary:            "critical security flaw",
+		Evidence:           "SQL injection on line 50",
+		FindingFingerprint: "correctness:run.go:sql-injection",
+		SuggestedAction:    "parameterize the query",
+	}
+
+	// The reviewer says request_changes with a critical finding.
+	runner := &fakeAgentRunner{
+		t: t,
+		steps: []fakeAgentStep{
+			{
+				agentType: agentrun.AgentReviewer,
+				attempt:   1,
+				lens:      "correctness",
+				result: agentrun.Result{
+					Status:       "request_changes",
+					Summary:      "critical issue found",
+					NextAction:   "return_to_developer",
+					ArtifactRefs: artifactRefsFor("review-01"),
+					Findings:     []agentrun.Finding{criticalFinding},
+				},
+			},
+		},
+	}
+
+	service := New(Dependencies{
+		Store:       storeService,
+		AgentRunner: runner,
+	})
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	snapshot, err = service.markReviewStarted(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("mark review started: %v", err)
+	}
+
+	stageResult, rawFindings, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", agentrun.ArtifactRefs{})
+	if err != nil {
+		t.Fatalf("run review stage: %v", err)
+	}
+	runner.assertExhausted(t)
+
+	// Verify the tool detected the critical finding.
+	if stageResult.reviewToolDecision == nil {
+		t.Fatalf("expected reviewToolDecision to be set")
+	}
+	if !stageResult.reviewToolDecision.HasCriticalFinding {
+		t.Fatalf("expected HasCriticalFinding=true")
+	}
+	if !stageResult.reviewToolDecision.HasBlockingFinding {
+		t.Fatalf("expected HasBlockingFinding=true")
+	}
+	if stageResult.reviewToolDecision.Decision != reviewagg.DecisionRequestChanges {
+		t.Fatalf("expected decision=request_changes, got %s", stageResult.reviewToolDecision.Decision)
+	}
+
+	// Verify handleReviewResult moves to review_failed (return to developer).
+	_, updatedSnapshot, err := service.handleReviewResult(context.Background(), snapshot, stageResult, rawFindings)
+	if err != nil {
+		t.Fatalf("handle review result: %v", err)
+	}
+	if updatedSnapshot.Status != "review_failed" {
+		t.Fatalf("expected review_failed, got %s", updatedSnapshot.Status)
+	}
+}
+
+// TestReviewResultToolEscalationOverridesFindings verifies that
+// reviewer escalation (has_reviewer_escalation) takes priority over
+// findings and forces awaiting_human even when there are findings.
+func TestReviewResultToolEscalationOverridesFindings(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-02",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       402,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "review_in_progress",
+		AttemptTotal:            1,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+		WorktreePath:            &worktreePath,
+	})
+
+	// Reviewer escalates with findings - escalation should take priority.
+	runner := &fakeAgentRunner{
+		t: t,
+		steps: []fakeAgentStep{
+			{
+				agentType: agentrun.AgentReviewer,
+				attempt:   1,
+				lens:      "correctness",
+				result: agentrun.Result{
+					Status:       "awaiting_human",
+					Summary:      "reviewer cannot confidently assess this change",
+					NextAction:   "await_human",
+					ArtifactRefs: artifactRefsFor("review-01"),
+					Findings: []agentrun.Finding{
+						{
+							ReviewerID:         "reviewer-correctness",
+							Lens:               "correctness",
+							Severity:           "high",
+							Confidence:         "low",
+							Category:           "correctness",
+							FileRefs:           []string{"internal/run.go"},
+							Summary:            "possible data race",
+							Evidence:           "concurrent access without synchronization",
+							FindingFingerprint: "correctness:run.go:data-race",
+							SuggestedAction:    "needs human review",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	service := New(Dependencies{
+		Store:       storeService,
+		AgentRunner: runner,
+	})
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	snapshot, err = service.markReviewStarted(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("mark review started: %v", err)
+	}
+
+	stageResult, rawFindings, err := service.runReviewStage(context.Background(), snapshot, RunTaskOptions{}, "correctness", agentrun.ArtifactRefs{})
+	if err != nil {
+		t.Fatalf("run review stage: %v", err)
+	}
+	runner.assertExhausted(t)
+
+	// Verify escalation takes priority over blocking findings.
+	if stageResult.reviewToolDecision == nil {
+		t.Fatalf("expected reviewToolDecision to be set")
+	}
+	if !stageResult.reviewToolDecision.HasReviewerEscalation {
+		t.Fatalf("expected HasReviewerEscalation=true")
+	}
+	if stageResult.reviewToolDecision.Decision != reviewagg.DecisionAwaitingHuman {
+		t.Fatalf("expected decision=awaiting_human despite blocking findings, got %s", stageResult.reviewToolDecision.Decision)
+	}
+
+	// Verify handleReviewResult enters awaiting_human.
+	_, updatedSnapshot, err := service.handleReviewResult(context.Background(), snapshot, stageResult, rawFindings)
+	if err != nil {
+		t.Fatalf("handle review result: %v", err)
+	}
+	if updatedSnapshot.Status != "awaiting_human" {
+		t.Fatalf("expected awaiting_human, got %s", updatedSnapshot.Status)
+	}
+	if !updatedSnapshot.NeedsHuman {
+		t.Fatalf("expected needs_human=true for awaiting_human")
+	}
+}
+
+// TestRunTaskInvalidRequestReturnsToDeveloperEndToEnd verifies the full RunTask
+// loop: when review-result-tool returns invalid_request (e.g. request_changes
+// without findings), the task transitions to review_failed and then re-enters
+// Developer on the next iteration, per TECH-V1 contract.
+func TestRunTaskInvalidRequestReturnsToDeveloperEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-02",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       402,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "in_progress",
+		AttemptTotal:            1,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+		WorktreePath:            &worktreePath,
+	})
+
+	runner := &fakeAgentRunner{
+		t: t,
+		steps: []fakeAgentStep{
+			// Round 1: developer → QA pass → reviewer returns request_changes without findings
+			{
+				agentType: agentrun.AgentDeveloper,
+				attempt:   1,
+				result: agentrun.Result{
+					Status:       "success",
+					Summary:      "developer round 1",
+					NextAction:   "proceed",
+					ArtifactRefs: artifactRefsFor("developer-01"),
+				},
+			},
+			{
+				agentType: agentrun.AgentQA,
+				attempt:   1,
+				result: agentrun.Result{
+					Status:       "pass",
+					Summary:      "qa passed",
+					NextAction:   "proceed",
+					ArtifactRefs: artifactRefsFor("qa-01"),
+				},
+			},
+			{
+				agentType: agentrun.AgentReviewer,
+				attempt:   1,
+				lens:      "correctness",
+				result: agentrun.Result{
+					Status:       "request_changes",
+					Summary:      "review wants changes but no findings",
+					NextAction:   "return_to_developer",
+					ArtifactRefs: artifactRefsFor("review-01"),
+					// No findings: review-result-tool rejects as invalid_request.
+				},
+			},
+			// Round 2: developer is re-entered after review_failed from invalid_request.
+			{
+				agentType: agentrun.AgentDeveloper,
+				attempt:   2,
+				result: agentrun.Result{
+					Status:       "success",
+					Summary:      "developer round 2 fixed contract",
+					NextAction:   "proceed",
+					ArtifactRefs: artifactRefsFor("developer-02"),
+				},
+			},
+			{
+				agentType: agentrun.AgentQA,
+				attempt:   2,
+				result: agentrun.Result{
+					Status:       "pass",
+					Summary:      "qa passed again",
+					NextAction:   "proceed",
+					ArtifactRefs: artifactRefsFor("qa-02"),
+				},
+			},
+			{
+				agentType: agentrun.AgentReviewer,
+				attempt:   2,
+				lens:      "correctness",
+				result: agentrun.Result{
+					Status:       "pass",
+					Summary:      "review passed",
+					NextAction:   "open_task_pr",
+					ArtifactRefs: artifactRefsFor("review-02"),
+				},
+			},
+		},
+	}
+
+	service := New(Dependencies{
+		Store:       storeService,
+		AgentRunner: runner,
+	})
+
+	result, err := service.RunTask(context.Background(), RunTaskOptions{
+		TaskID: "Sprint-04/Task-02",
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	runner.assertExhausted(t)
+
+	if result.Status != "pr_open" {
+		t.Fatalf("expected pr_open after recovery from invalid_request, got %s", result.Status)
+	}
+	// Stage results: dev1, qa1, review1(invalid_request→review_failed), dev2, qa2, review2(pass)
+	if len(result.StageResults) != 6 {
+		t.Fatalf("expected 6 stage results, got %d: %+v", len(result.StageResults), result.StageResults)
+	}
+	// The review_failed stage result should carry the invalid_request fingerprint.
+	reviewFailedResult := result.StageResults[2]
+	if reviewFailedResult.Stage != StageReview || reviewFailedResult.TaskStatus != "review_failed" {
+		t.Fatalf("expected review stage with review_failed status, got %+v", reviewFailedResult)
+	}
+	if reviewFailedResult.FailureFingerprint != "review-result-tool:invalid_request" {
+		t.Fatalf("expected invalid_request fingerprint, got %s", reviewFailedResult.FailureFingerprint)
+	}
+
+	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-02")
+	if taskRow.Status != "pr_open" {
+		t.Fatalf("expected task status pr_open, got %s", taskRow.Status)
+	}
+}
+
+// TestRunTaskAwaitingHumanIsAtomicRecovery verifies that when the reviewer
+// escalates to human, the task transitions atomically to awaiting_human.
+// Even if recordTaskAwaitingHuman is skipped, the task is already in
+// awaiting_human from the atomic recordReviewOutcome call.
+func TestRunTaskAwaitingHumanIsAtomicRecovery(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-02",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       402,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "in_progress",
+		AttemptTotal:            1,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+		WorktreePath:            &worktreePath,
+	})
+
+	runner := &fakeAgentRunner{
+		t: t,
+		steps: []fakeAgentStep{
+			{
+				agentType: agentrun.AgentDeveloper,
+				attempt:   1,
+				result: agentrun.Result{
+					Status:       "success",
+					Summary:      "developer finished",
+					NextAction:   "proceed",
+					ArtifactRefs: artifactRefsFor("developer-01"),
+				},
+			},
+			{
+				agentType: agentrun.AgentQA,
+				attempt:   1,
+				result: agentrun.Result{
+					Status:       "pass",
+					Summary:      "qa passed",
+					NextAction:   "proceed",
+					ArtifactRefs: artifactRefsFor("qa-01"),
+				},
+			},
+			{
+				agentType: agentrun.AgentReviewer,
+				attempt:   1,
+				lens:      "correctness",
+				result: agentrun.Result{
+					Status:       "awaiting_human",
+					Summary:      "reviewer cannot decide, needs human",
+					NextAction:   "await_human",
+					ArtifactRefs: artifactRefsFor("review-01"),
+					Findings: []agentrun.Finding{
+						{
+							ReviewerID:         "reviewer-correctness",
+							Lens:               "correctness",
+							Severity:           "medium",
+							Confidence:         "low",
+							Category:           "correctness",
+							FileRefs:           []string{"internal/orchestrator/run.go"},
+							Summary:            "ambiguous race condition",
+							Evidence:           "concurrent access without lock",
+							FindingFingerprint: "correctness:run.go:race",
+							SuggestedAction:    "human review needed",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	service := New(Dependencies{
+		Store:       storeService,
+		AgentRunner: runner,
+	})
+
+	result, err := service.RunTask(context.Background(), RunTaskOptions{
+		TaskID: "Sprint-04/Task-02",
+	})
+	if err != nil {
+		t.Fatalf("run task: %v", err)
+	}
+	runner.assertExhausted(t)
+
+	if result.Status != "awaiting_human" {
+		t.Fatalf("expected awaiting_human, got %s", result.Status)
+	}
+
+	// Verify the task row is atomically in awaiting_human with needs_human=true.
+	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-02")
+	if taskRow.Status != "awaiting_human" {
+		t.Fatalf("expected task status awaiting_human, got %s", taskRow.Status)
+	}
+	if !taskRow.NeedsHuman {
+		t.Fatalf("expected needs_human=true for awaiting_human")
+	}
+
+	// Simulate recovery: running RunTask again should see awaiting_human and
+	// return a no-op result, NOT fall through to developer.
+	result2, err := service.RunTask(context.Background(), RunTaskOptions{
+		TaskID: "Sprint-04/Task-02",
+	})
+	if err != nil {
+		t.Fatalf("recovery run task: %v", err)
+	}
+	if result2.Status != "awaiting_human" {
+		t.Fatalf("expected awaiting_human on recovery, got %s", result2.Status)
+	}
+	if len(result2.StageResults) != 0 {
+		t.Fatalf("expected no stage results on recovery no-op, got %d", len(result2.StageResults))
+	}
 }
 
 func TestMain(m *testing.M) {

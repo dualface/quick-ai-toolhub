@@ -11,6 +11,7 @@ import (
 	"quick-ai-toolhub/internal/agentrun"
 	toolgit "quick-ai-toolhub/internal/git"
 	toolgithub "quick-ai-toolhub/internal/github"
+	"quick-ai-toolhub/internal/reviewagg"
 	"quick-ai-toolhub/internal/store"
 	"quick-ai-toolhub/internal/timeline"
 )
@@ -22,6 +23,7 @@ type Service struct {
 	git         *toolgit.Client
 	timeline    *timeline.Service
 	agentRunner AgentRunner
+	reviewAgg   *reviewagg.Service
 }
 
 type Dependencies struct {
@@ -31,6 +33,7 @@ type Dependencies struct {
 	Git         *toolgit.Client
 	Timeline    *timeline.Service
 	AgentRunner AgentRunner
+	ReviewAgg   *reviewagg.Service
 }
 
 type AgentRunner interface {
@@ -88,6 +91,20 @@ type StageResult struct {
 	FailureFingerprint string                `json:"failure_fingerprint"`
 	ArtifactRefs       agentrun.ArtifactRefs `json:"artifact_refs"`
 	Findings           []agentrun.Finding    `json:"findings"`
+
+	// reviewToolDecision holds the structured decision from review-result-tool.
+	// This is internal-only and not serialized to JSON.
+	reviewToolDecision *reviewToolDecisionMeta `json:"-"`
+}
+
+// reviewToolDecisionMeta holds the structured output from review-result-tool.
+// The orchestrator consumes this instead of parsing raw reviewer status.
+type reviewToolDecisionMeta struct {
+	Decision              reviewagg.Decision
+	HasCriticalFinding    bool
+	HasBlockingFinding    bool
+	HasReviewerEscalation bool
+	Summary               string
 }
 
 type RunTaskResult struct {
@@ -126,6 +143,10 @@ type taskRuntimeSnapshot struct {
 }
 
 func New(deps Dependencies) *Service {
+	ra := deps.ReviewAgg
+	if ra == nil {
+		ra = reviewagg.New()
+	}
 	return &Service{
 		logger:      componentLogger(deps.Logger),
 		store:       deps.Store,
@@ -133,6 +154,7 @@ func New(deps Dependencies) *Service {
 		git:         deps.Git,
 		timeline:    deps.Timeline,
 		agentRunner: deps.AgentRunner,
+		reviewAgg:   ra,
 	}
 }
 
