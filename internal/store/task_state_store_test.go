@@ -208,6 +208,63 @@ func TestTaskStateStoreUpdateTaskStateClearsOptionalStringFieldsWhenBlank(t *tes
 	}
 }
 
+func TestBaseStoreLoadTaskFailureSignalsMapsTasksTableFields(t *testing.T) {
+	base, service := openTestBaseStore(t)
+	insertSprintRow(t, service, sprintSeed{
+		SprintID:          "Sprint-01",
+		SequenceNo:        1,
+		GitHubIssueNumber: 101,
+		Status:            "in_progress",
+	})
+	insertTaskRow(t, service, taskSeed{
+		TaskID:                    "Sprint-01/Task-04",
+		SprintID:                  "Sprint-01",
+		TaskLocalID:               "Task-04",
+		SequenceNo:                4,
+		GitHubIssueNumber:         201,
+		ParentGitHubIssueNumber:   101,
+		Status:                    "review_failed",
+		AttemptTotal:              5,
+		QAFailCount:               2,
+		ReviewFailCount:           3,
+		CIFailCount:               4,
+		CurrentFailureFingerprint: stringPtr("review:findings:abcd1234"),
+	})
+
+	signals, err := base.LoadTaskFailureSignals(context.Background(), "Sprint-01/Task-04")
+	if err != nil {
+		t.Fatalf("load task failure signals: %v", err)
+	}
+
+	if signals.TaskID != "Sprint-01/Task-04" {
+		t.Fatalf("unexpected task_id: %s", signals.TaskID)
+	}
+	if signals.AttemptTotal != 5 || signals.QAFailCount != 2 || signals.ReviewFailCount != 3 || signals.CIFailCount != 4 {
+		t.Fatalf("unexpected counter mapping: %+v", signals)
+	}
+	if signals.CurrentFailureFingerprint == nil || *signals.CurrentFailureFingerprint != "review:findings:abcd1234" {
+		t.Fatalf("unexpected current_failure_fingerprint: %#v", signals.CurrentFailureFingerprint)
+	}
+}
+
+func TestBaseStoreLoadTaskFailureSignalsRejectsBlankTaskID(t *testing.T) {
+	base, _ := openTestBaseStore(t)
+
+	_, err := base.LoadTaskFailureSignals(context.Background(), " ")
+	if err == nil || err.Error() != "task_id is required" {
+		t.Fatalf("expected task_id validation error, got %v", err)
+	}
+}
+
+func TestBaseStoreLoadTaskFailureSignalsReturnsNotFound(t *testing.T) {
+	base, _ := openTestBaseStore(t)
+
+	_, err := base.LoadTaskFailureSignals(context.Background(), "Sprint-01/Task-99")
+	if err == nil || err.Error() != `task "Sprint-01/Task-99" not found` {
+		t.Fatalf("expected not found error, got %v", err)
+	}
+}
+
 func TestTaskStateStoreUpdateSprintStateOnlyTouchesProvidedFields(t *testing.T) {
 	base, service := openTestBaseStore(t)
 	insertSprintRow(t, service, sprintSeed{

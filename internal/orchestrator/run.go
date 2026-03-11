@@ -709,6 +709,31 @@ func (s *Service) handleReviewResult(ctx context.Context, snapshot taskRuntimeSn
 	return result, updatedSnapshot, nil
 }
 
+func (s *Service) recordCIFailure(ctx context.Context, snapshot taskRuntimeSnapshot, result StageResult) (StageResult, taskRuntimeSnapshot, error) {
+	if isRetryableStageFailure(result) {
+		return retryableStageResult(snapshot, result), snapshot, nil
+	}
+
+	result.Stage = StageCI
+	update := store.UpdateTaskStatePayload{
+		TaskID:                    snapshot.TaskID,
+		Status:                    "ci_failed",
+		CIFailCount:               intPointer(snapshot.CIFailCount + 1),
+		NeedsHuman:                boolPointer(false),
+		HumanReason:               emptyStringPointer(),
+		CurrentFailureFingerprint: stringPointer(stageFailureFingerprint(StageCI, result)),
+	}
+	result.FailureFingerprint = optionalString(update.CurrentFailureFingerprint)
+
+	eventID, updatedSnapshot, err := s.recordStageOutcome(ctx, snapshot, "ci_in_progress", eventCIFailed, "ci_failed", result, update)
+	if err != nil {
+		return StageResult{}, taskRuntimeSnapshot{}, err
+	}
+	result.EventID = eventID
+	result.TaskStatus = updatedSnapshot.Status
+	return result, updatedSnapshot, nil
+}
+
 func (s *Service) handleTransitionBudgetExceeded(
 	ctx context.Context,
 	taskID string,
@@ -1367,13 +1392,6 @@ func reviewOutcomeNextAction(decision reviewagg.Decision) string {
 	}
 }
 
-func stageFailureFingerprint(stage Stage, result StageResult) string {
-	if strings.TrimSpace(result.FailureFingerprint) != "" {
-		return strings.TrimSpace(result.FailureFingerprint)
-	}
-	return fmt.Sprintf("%s:%s:%s", stage, strings.TrimSpace(result.Status), strings.TrimSpace(result.NextAction))
-}
-
 func awaitingHumanReason(result StageResult) string {
 	if s := strings.TrimSpace(result.Summary); s != "" {
 		return s
@@ -1441,13 +1459,6 @@ func transitionBudgetStageResult(
 		stageResult.AgentType = agentTypeForStage(stage)
 	}
 	return stageResult, true
-}
-
-func reviewFailureFingerprint(attempt int, findings []agentrun.Finding, fallback string) string {
-	if len(findings) > 0 && strings.TrimSpace(findings[0].FindingFingerprint) != "" {
-		return strings.TrimSpace(findings[0].FindingFingerprint)
-	}
-	return fmt.Sprintf("review:%02d:%s", attempt, strings.TrimSpace(fallback))
 }
 
 func normalizedReviewerLens(rawLens string) (string, error) {

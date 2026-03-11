@@ -46,6 +46,7 @@ const (
 	StageDeveloper Stage = "developer"
 	StageQA        Stage = "qa"
 	StageReview    Stage = "review"
+	StageCI        Stage = "ci"
 )
 
 const (
@@ -60,6 +61,8 @@ const (
 	eventReviewChangesReq   = "review_changes_requested"
 	eventReviewAwaitsHuman  = "review_awaits_human"
 	eventReviewAggregated   = "review_aggregated"
+	eventCIPassed           = "ci_passed"
+	eventCIFailed           = "ci_failed"
 	eventTaskBlocked        = "task_blocked"
 	eventTaskAwaitingHuman  = "task_awaiting_human"
 	eventTaskEscalated      = "task_escalated"

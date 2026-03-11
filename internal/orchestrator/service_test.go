@@ -1640,6 +1640,299 @@ func TestHandleQAPassAwaitHumanBlocksTask(t *testing.T) {
 	assertOrchestratorEventTypes(t, storeService, []string{eventTaskBlocked})
 }
 
+func TestRecordCIFailureIncrementsSignalsAndPersistsFingerprint(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                    "Sprint-04/Task-05",
+		SprintID:                  "Sprint-04",
+		TaskLocalID:               "Task-05",
+		SequenceNo:                5,
+		GitHubIssueNumber:         405,
+		ParentGitHubIssueNumber:   401,
+		Status:                    "ci_in_progress",
+		AttemptTotal:              3,
+		QAFailCount:               1,
+		ReviewFailCount:           2,
+		CIFailCount:               4,
+		CurrentFailureFingerprint: stringPtr("ci:stale"),
+		TaskBranch:                stringPtr("task/Sprint-04/Task-05"),
+		WorktreePath:              &worktreePath,
+		NeedsHuman:                true,
+		HumanReason:               stringPtr("stale ci gate"),
+	})
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-05")
+	if err != nil {
+		t.Fatalf("load task runtime: %v", err)
+	}
+
+	service := New(Dependencies{Store: storeService})
+	result, updatedSnapshot, err := service.recordCIFailure(context.Background(), snapshot, StageResult{
+		Stage:        StageCI,
+		Attempt:      3,
+		Status:       "failed",
+		Summary:      "ci failed on integration suite",
+		NextAction:   "return_to_developer",
+		ArtifactRefs: artifactRefsFor("ci-failed-03"),
+	})
+	if err != nil {
+		t.Fatalf("record ci failure: %v", err)
+	}
+
+	if updatedSnapshot.Status != "ci_failed" || result.TaskStatus != "ci_failed" {
+		t.Fatalf("expected ci_failed status, got snapshot=%+v result=%+v", updatedSnapshot, result)
+	}
+	if updatedSnapshot.AttemptTotal != 3 {
+		t.Fatalf("expected attempt_total to remain unchanged, got %d", updatedSnapshot.AttemptTotal)
+	}
+	if result.FailureFingerprint != "ci:failed:return_to_developer" {
+		t.Fatalf("unexpected ci failure fingerprint: %+v", result)
+	}
+
+	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-05")
+	if taskRow.Status != "ci_failed" {
+		t.Fatalf("unexpected task status after ci failure: %+v", taskRow)
+	}
+	if taskRow.AttemptTotal != 3 || taskRow.QAFailCount != 1 || taskRow.ReviewFailCount != 2 || taskRow.CIFailCount != 5 {
+		t.Fatalf("unexpected persisted counters after ci failure: %+v", taskRow)
+	}
+	if taskRow.CurrentFailureFingerprint == nil || *taskRow.CurrentFailureFingerprint != result.FailureFingerprint {
+		t.Fatalf("unexpected persisted ci failure fingerprint: row=%#v result=%q", taskRow.CurrentFailureFingerprint, result.FailureFingerprint)
+	}
+	if taskRow.NeedsHuman {
+		t.Fatalf("expected needs_human to clear on ci failure retry path, got %+v", taskRow)
+	}
+	if taskRow.HumanReason != nil {
+		t.Fatalf("expected human_reason to clear on ci failure retry path, got %#v", taskRow.HumanReason)
+	}
+
+	base, err := storeService.BaseStore()
+	if err != nil {
+		t.Fatalf("store base: %v", err)
+	}
+	signals, err := base.LoadTaskFailureSignals(context.Background(), "Sprint-04/Task-05")
+	if err != nil {
+		t.Fatalf("load task failure signals: %v", err)
+	}
+	if signals.AttemptTotal != 3 || signals.QAFailCount != 1 || signals.ReviewFailCount != 2 || signals.CIFailCount != 5 {
+		t.Fatalf("unexpected failure signals after ci failure: %+v", signals)
+	}
+	if signals.CurrentFailureFingerprint == nil || *signals.CurrentFailureFingerprint != result.FailureFingerprint {
+		t.Fatalf("unexpected failure signal fingerprint: %#v", signals.CurrentFailureFingerprint)
+	}
+
+	assertOrchestratorEventTypes(t, storeService, []string{eventCIFailed})
+}
+
+func TestRecordCIFailureUsesProvidedFingerprint(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-05",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-05",
+		SequenceNo:              5,
+		GitHubIssueNumber:       405,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "ci_in_progress",
+		AttemptTotal:            2,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-05"),
+		WorktreePath:            &worktreePath,
+	})
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-05")
+	if err != nil {
+		t.Fatalf("load task runtime: %v", err)
+	}
+
+	service := New(Dependencies{Store: storeService})
+	result, _, err := service.recordCIFailure(context.Background(), snapshot, StageResult{
+		Stage:              StageCI,
+		Attempt:            2,
+		Status:             "failed",
+		Summary:            "workflow failed on lint",
+		NextAction:         "return_to_developer",
+		FailureFingerprint: "ci:lint:golangci-lint",
+		ArtifactRefs:       artifactRefsFor("ci-failed-explicit-02"),
+	})
+	if err != nil {
+		t.Fatalf("record ci failure: %v", err)
+	}
+
+	if result.FailureFingerprint != "ci:lint:golangci-lint" {
+		t.Fatalf("expected explicit ci failure fingerprint to be preserved, got %+v", result)
+	}
+
+	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-05")
+	if taskRow.CIFailCount != 1 {
+		t.Fatalf("expected ci fail count increment, got %+v", taskRow)
+	}
+	if taskRow.CurrentFailureFingerprint == nil || *taskRow.CurrentFailureFingerprint != "ci:lint:golangci-lint" {
+		t.Fatalf("unexpected persisted explicit ci failure fingerprint: %#v", taskRow.CurrentFailureFingerprint)
+	}
+}
+
+func TestStableFailureFingerprintIgnoresReviewFindingOrderAndAttempt(t *testing.T) {
+	t.Parallel()
+
+	findingsA := []agentrun.Finding{
+		{FindingFingerprint: "review:api:contract"},
+		{FindingFingerprint: "review:state:transition"},
+		{FindingFingerprint: "review:api:contract"},
+	}
+	findingsB := []agentrun.Finding{
+		{FindingFingerprint: "review:state:transition"},
+		{FindingFingerprint: "review:api:contract"},
+	}
+
+	first := reviewFailureFingerprint(1, findingsA, "request_changes")
+	second := reviewFailureFingerprint(7, findingsB, "request_changes")
+
+	if first == "" || second == "" {
+		t.Fatalf("expected stable review fingerprints, got %q and %q", first, second)
+	}
+	if first != second {
+		t.Fatalf("expected fingerprint to ignore attempt and finding order, got %q vs %q", first, second)
+	}
+	if strings.Contains(first, ":01:") || strings.Contains(first, ":07:") {
+		t.Fatalf("expected review fingerprint to avoid attempt-specific tokens, got %q", first)
+	}
+}
+
+func TestHandleReviewRequestChangesPersistsStableFingerprintAcrossAttempts(t *testing.T) {
+	t.Parallel()
+
+	storeService := openOrchestratorTestStore(t)
+	worktreePath := t.TempDir()
+	insertOrchestratorSprintRow(t, storeService, orchestratorSprintSeed{
+		SprintID:          "Sprint-04",
+		SequenceNo:        4,
+		GitHubIssueNumber: 401,
+		Status:            "in_progress",
+	})
+	insertOrchestratorTaskRow(t, storeService, orchestratorTaskSeed{
+		TaskID:                  "Sprint-04/Task-02",
+		SprintID:                "Sprint-04",
+		TaskLocalID:             "Task-02",
+		SequenceNo:              2,
+		GitHubIssueNumber:       402,
+		ParentGitHubIssueNumber: 401,
+		Status:                  "review_in_progress",
+		AttemptTotal:            2,
+		TaskBranch:              stringPtr("task/Sprint-04/Task-02"),
+		WorktreePath:            &worktreePath,
+	})
+
+	db, err := storeService.DB()
+	if err != nil {
+		t.Fatalf("store db: %v", err)
+	}
+	service := New(Dependencies{Store: storeService})
+
+	snapshot, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+	if err != nil {
+		t.Fatalf("load task runtime: %v", err)
+	}
+
+	firstResult, _, err := service.handleReviewResult(context.Background(), snapshot, StageResult{
+		Stage:      StageReview,
+		AgentType:  agentrun.AgentReviewer,
+		Attempt:    2,
+		Status:     eventReviewChangesReq,
+		Summary:    "review found the same blocking issues",
+		NextAction: "return_to_developer",
+		Findings: []agentrun.Finding{
+			{ReviewerID: "reviewer-correctness", Lens: "correctness", Severity: "high", Confidence: "high", Category: "correctness", Summary: "api contract mismatch", Evidence: "callers still use the old payload", FindingFingerprint: "review:api:contract", SuggestedAction: "align the payload"},
+			{ReviewerID: "reviewer-correctness", Lens: "correctness", Severity: "medium", Confidence: "medium", Category: "state", Summary: "state transition still regresses", Evidence: "qa replay reproduces the same path", FindingFingerprint: "review:state:transition", SuggestedAction: "fix the transition"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("handle first review result: %v", err)
+	}
+
+	firstFingerprint := firstResult.FailureFingerprint
+	if firstFingerprint == "" {
+		t.Fatalf("expected first review fingerprint, got %+v", firstResult)
+	}
+
+	reloaded, err := loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+	if err != nil {
+		t.Fatalf("reload task runtime: %v", err)
+	}
+	reloaded, err = service.enterDeveloperStage(context.Background(), reloaded, true)
+	if err != nil {
+		t.Fatalf("enter developer retry stage: %v", err)
+	}
+	if reloaded.AttemptTotal != 3 {
+		t.Fatalf("expected retry to advance attempt_total to 3, got %+v", reloaded)
+	}
+
+	if _, err := db.ExecContext(context.Background(), `UPDATE tasks SET status = ? WHERE task_id = ?`, "review_in_progress", "Sprint-04/Task-02"); err != nil {
+		t.Fatalf("promote task back to review_in_progress: %v", err)
+	}
+
+	reloaded, err = loadTaskRuntimeSnapshot(context.Background(), db, "Sprint-04/Task-02")
+	if err != nil {
+		t.Fatalf("reload task runtime for second review: %v", err)
+	}
+
+	secondResult, _, err := service.handleReviewResult(context.Background(), reloaded, StageResult{
+		Stage:      StageReview,
+		AgentType:  agentrun.AgentReviewer,
+		Attempt:    3,
+		Status:     eventReviewChangesReq,
+		Summary:    "review found the same blocking issues again",
+		NextAction: "return_to_developer",
+		Findings: []agentrun.Finding{
+			{ReviewerID: "reviewer-correctness", Lens: "correctness", Severity: "medium", Confidence: "medium", Category: "state", Summary: "state transition still regresses", Evidence: "qa replay reproduces the same path", FindingFingerprint: "review:state:transition", SuggestedAction: "fix the transition"},
+			{ReviewerID: "reviewer-correctness", Lens: "correctness", Severity: "high", Confidence: "high", Category: "correctness", Summary: "api contract mismatch", Evidence: "callers still use the old payload", FindingFingerprint: "review:api:contract", SuggestedAction: "align the payload"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("handle second review result: %v", err)
+	}
+
+	if secondResult.FailureFingerprint != firstFingerprint {
+		t.Fatalf("expected stable review fingerprint across attempts, got %q vs %q", firstFingerprint, secondResult.FailureFingerprint)
+	}
+
+	taskRow := loadOrchestratorTaskRow(t, storeService, "Sprint-04/Task-02")
+	if taskRow.Status != "review_failed" {
+		t.Fatalf("expected review_failed task row, got %+v", taskRow)
+	}
+	if taskRow.AttemptTotal != 3 || taskRow.ReviewFailCount != 2 || taskRow.QAFailCount != 0 || taskRow.CIFailCount != 0 {
+		t.Fatalf("unexpected counter state after repeated review failure: %+v", taskRow)
+	}
+	if taskRow.CurrentFailureFingerprint == nil || *taskRow.CurrentFailureFingerprint != firstFingerprint {
+		t.Fatalf("unexpected persisted review fingerprint: row=%#v want=%q", taskRow.CurrentFailureFingerprint, firstFingerprint)
+	}
+}
+
 func TestNormalizedReviewerLens(t *testing.T) {
 	t.Parallel()
 
@@ -2913,6 +3206,7 @@ type orchestratorTaskSeed struct {
 	AttemptTotal              int
 	QAFailCount               int
 	ReviewFailCount           int
+	CIFailCount               int
 	CurrentFailureFingerprint *string
 	TaskBranch                *string
 	WorktreePath              *string
@@ -3033,7 +3327,7 @@ func insertOrchestratorTaskRow(t *testing.T, service *store.Service, seed orches
 		seed.AttemptTotal,
 		seed.QAFailCount,
 		seed.ReviewFailCount,
-		0,
+		seed.CIFailCount,
 		seed.CurrentFailureFingerprint,
 		nil,
 		seed.TaskBranch,
@@ -3094,6 +3388,7 @@ type orchestratorTaskRow struct {
 	AttemptTotal              int
 	QAFailCount               int
 	ReviewFailCount           int
+	CIFailCount               int
 	CurrentFailureFingerprint *string
 	NeedsHuman                bool
 	HumanReason               *string
@@ -3110,13 +3405,14 @@ func loadOrchestratorTaskRow(t *testing.T, service *store.Service, taskID string
 	var row orchestratorTaskRow
 	if err := db.QueryRowContext(
 		context.Background(),
-		`SELECT status, attempt_total, qa_fail_count, review_fail_count, current_failure_fingerprint, needs_human, human_reason FROM tasks WHERE task_id = ?`,
+		`SELECT status, attempt_total, qa_fail_count, review_fail_count, ci_fail_count, current_failure_fingerprint, needs_human, human_reason FROM tasks WHERE task_id = ?`,
 		taskID,
 	).Scan(
 		&row.Status,
 		&row.AttemptTotal,
 		&row.QAFailCount,
 		&row.ReviewFailCount,
+		&row.CIFailCount,
 		&row.CurrentFailureFingerprint,
 		&row.NeedsHuman,
 		&row.HumanReason,

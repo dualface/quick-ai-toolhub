@@ -174,6 +174,15 @@ type TaskProjection struct {
 	HumanReason       *string `json:"human_reason,omitempty"`
 }
 
+type TaskFailureSignals struct {
+	TaskID                    string  `json:"task_id"`
+	AttemptTotal              int     `json:"attempt_total"`
+	QAFailCount               int     `json:"qa_fail_count"`
+	ReviewFailCount           int     `json:"review_fail_count"`
+	CIFailCount               int     `json:"ci_fail_count"`
+	CurrentFailureFingerprint *string `json:"current_failure_fingerprint,omitempty"`
+}
+
 type OutboxAction struct {
 	ActionID           string         `json:"action_id"`
 	EntityType         string         `json:"entity_type"`
@@ -498,6 +507,19 @@ func (s BaseStore) LoadTaskProjection(ctx context.Context, taskID string) (TaskP
 	return loadTaskProjection(ctx, db, taskID)
 }
 
+func (s BaseStore) LoadTaskFailureSignals(ctx context.Context, taskID string) (TaskFailureSignals, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return TaskFailureSignals{}, newValidationError("task_id is required")
+	}
+
+	db, err := s.requireDB()
+	if err != nil {
+		return TaskFailureSignals{}, err
+	}
+
+	return loadTaskFailureSignals(ctx, db, taskID)
+}
+
 func (s BaseStore) LoadSprintProjection(ctx context.Context, sprintID string) (SprintProjection, error) {
 	if strings.TrimSpace(sprintID) == "" {
 		return SprintProjection{}, newValidationError("sprint_id is required")
@@ -748,6 +770,30 @@ func loadTaskProjection(ctx context.Context, db bun.IDB, taskID string) (TaskPro
 		return TaskProjection{}, fmt.Errorf("load task projection: %w", err)
 	}
 	return record.toProjection(), nil
+}
+
+func loadTaskFailureSignals(ctx context.Context, db bun.IDB, taskID string) (TaskFailureSignals, error) {
+	var signals TaskFailureSignals
+	err := db.NewSelect().
+		TableExpr("tasks").
+		Column(
+			"task_id",
+			"attempt_total",
+			"qa_fail_count",
+			"review_fail_count",
+			"ci_fail_count",
+			"current_failure_fingerprint",
+		).
+		Where("task_id = ?", taskID).
+		Limit(1).
+		Scan(ctx, &signals)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TaskFailureSignals{}, &notFoundError{resource: "task", id: taskID}
+		}
+		return TaskFailureSignals{}, fmt.Errorf("load task failure signals: %w", err)
+	}
+	return signals, nil
 }
 
 func loadSprintProjection(ctx context.Context, db bun.IDB, sprintID string) (SprintProjection, error) {
